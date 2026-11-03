@@ -340,7 +340,7 @@ fn component(message: &Value) -> Option<Value> {
         .map(|text| json!({ "text": text }))
 }
 
-/// Vanilla's `Codec.INT`: numeric input narrows through `Number.intValue`, including fractions and overflow.
+/// Vanilla's `Codec.INT`: numeric input narrows through Java's integer conversion, including fractions and overflow.
 fn management_int(value: &Value) -> Result<i32, Failure> {
     let parsed = if let Some(number) = value.as_i64() {
         Some(number as i32)
@@ -351,7 +351,8 @@ fn management_int(value: &Value) -> Result<i32, Failure> {
             .as_f64()
             .filter(|number| number.is_finite())
             .map(|number| {
-                // Gson's LazilyParsedNumber falls back to BigDecimal.intValue: truncate, then keep 32 bits.
+                // Gson's JSON parser creates a LazilyParsedNumber, not a Double. Its BigDecimal
+                // `intValue` fallback truncates the decimal and keeps the low 32 bits rather than saturating.
                 number.trunc().rem_euclid(4_294_967_296.0) as u32 as i32
             })
     };

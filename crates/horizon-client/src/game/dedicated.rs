@@ -432,6 +432,10 @@ pub(super) struct Lists {
     pub enforce_whitelist: bool,
     /// `op-permission-level`: what `/op` grants (operatorUserPermissions).
     pub op_level: i32,
+    /// `MinecraftServer.playerIdleTimeout`: the minutes of idleness after
+    /// which a player is kicked, `player-idle-timeout` at the start and
+    /// `/setidletimeout` after it.
+    pub player_idle_timeout: i32,
 }
 impl Lists {
     fn load() -> Self {
@@ -443,6 +447,7 @@ impl Lists {
             use_whitelist: false,
             enforce_whitelist: false,
             op_level: 4,
+            player_idle_timeout: 0,
         };
         // Each list tells the event stream what changes in it, as vanilla's tell their `NotificationService`.
         l.ops.watch(|change| {
@@ -658,8 +663,6 @@ struct ServerState {
     stop: bool,
     autosave: bool,
     empty_ticks: i32,
-    /// The mutable `DedicatedServer.playerIdleTimeout` setting, in minutes.
-    player_idle_timeout: i32,
     /// When the last passes of the loop ended, for the tick rate horizon-server shows.
     ticks: std::collections::VecDeque<Instant>,
     paused: bool,
@@ -841,6 +844,7 @@ impl Game<'_> {
         lists.use_whitelist = props.white_list;
         lists.enforce_whitelist = props.enforce_whitelist;
         lists.op_level = props.op_permission_level;
+        lists.player_idle_timeout = props.player_idle_timeout;
         let lists = Arc::new(Mutex::new(lists));
         self.server_lists = Some(lists.clone());
         log("INFO", &format!("Preparing level \"{level_name}\""));
@@ -1054,7 +1058,6 @@ impl Game<'_> {
             stop: false,
             autosave: true,
             empty_ticks: 0,
-            player_idle_timeout: props.player_idle_timeout,
             ticks: Default::default(),
             paused: false,
             broadcast_console: props.broadcast_console_to_ops,
@@ -1155,8 +1158,11 @@ impl Game<'_> {
             {
                 host.hub.send_low_disk_space_warning();
             }
-            if state.player_idle_timeout > 0 {
-                self.kick_idle(state.player_idle_timeout);
+            // `PlayerList.tick` reads `MinecraftServer.playerIdleTimeout`
+            // every tick, so `/setidletimeout` changes it while the server runs.
+            let idle_timeout = state.lists.lock().unwrap().player_idle_timeout;
+            if idle_timeout > 0 {
+                self.kick_idle(idle_timeout);
             }
             // MinecraftServer.tickServer records each tick's time, for /tick query (and the status).
             self.clock.record(tick_start.elapsed());
@@ -1845,8 +1851,8 @@ impl Game<'_> {
     }
 
     /// `DedicatedServer.setPlayerIdleTimeout`: update the live idle sweep and persist its minutes.
-    fn set_player_idle_timeout(&mut self, state: &mut ServerState, minutes: i32) {
-        state.player_idle_timeout = minutes;
+    fn set_player_idle_timeout(&mut self, lists: &Arc<Mutex<Lists>>, minutes: i32) {
+        lists.lock().unwrap().player_idle_timeout = minutes;
         self.store_property("player-idle-timeout", minutes.to_string());
     }
 
