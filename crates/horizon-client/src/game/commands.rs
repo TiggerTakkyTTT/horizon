@@ -1717,6 +1717,9 @@ impl Game<'_> {
                     p.velocity = Vec3::new(0.0, 0.0, 0.0);
                     p.fall_distance = 0.0;
                     p.ground.on_ground = false;
+                    // ServerPlayer.teleport always sends a position packet,
+                    // even when the destination equals the current position.
+                    p.teleported = true;
                 }
                 self.previous_position = v;
                 if let Some([yaw, pitch]) = rotation {
@@ -4709,6 +4712,23 @@ mod teleport_pitch_tests {
             )));
             assert_eq!([game.mobs[0].yaw, game.mobs[0].head_pitch], expected);
         }
+    }
+
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn teleport_to_the_current_position_marks_the_player_for_sync() {
+        use super::Target;
+        use crate::game::native_machines::tests::server_game;
+        use crate::motion::PlayerMotion;
+        use horizon_core::geometry::Vec3;
+
+        let mut game = server_game();
+        let at = Vec3::new(0.5, 64.0, 0.5);
+        game.player = Some(PlayerMotion::new(game.motion, at).unwrap());
+
+        game.teleport_to_in_level(Target::Player, [at.x, at.y, at.z], None, false);
+
+        assert!(game.player.as_ref().is_some_and(|p| p.teleported));
     }
 
     #[test]
