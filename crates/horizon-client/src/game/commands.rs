@@ -1588,9 +1588,8 @@ impl Game<'_> {
             Target::Player => {
                 // ServerPlayer.teleport: removeVehicle before placing the player.
                 self.stop_riding();
-                // A server's player teleported within their level is placed
-                // there at once: the arrival they were waiting for elsewhere
-                // in it (whose chunks lose their tickets) is abandoned.
+                // A server's player teleported within their level is placed at once;
+                // its pending arrival (whose chunks lose their tickets) is abandoned.
                 if let Some(conn) = self.lan_acting {
                     horizon_client::lan::hub::teleport_cause(Some("command"));
                     self.server_trips.retain(|trip| !trip.is(conn));
@@ -1604,8 +1603,6 @@ impl Game<'_> {
                     p.velocity = Vec3::new(0.0, 0.0, 0.0);
                     p.fall_distance = 0.0;
                     p.ground.on_ground = false;
-                    // ServerPlayer.teleport always sends a position packet,
-                    // even when the destination equals the current position.
                     p.teleported = true;
                 }
                 self.previous_position = v;
