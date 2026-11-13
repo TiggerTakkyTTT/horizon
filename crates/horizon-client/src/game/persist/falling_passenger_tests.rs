@@ -60,5 +60,25 @@ fn summon_falling_block_loads_non_mob_passengers() {
         ));
         assert_eq!(game.falling.len(), 2, "both falling blocks should load");
         assert_eq!(game.armor_stands.len(), 1, "the armor stand should load");
+        let root = game
+            .falling
+            .iter()
+            .find(|falling| !game.persist.falling_vehicles.contains_key(&falling.id))
+            .expect("the summoned falling block is the vehicle");
+        let stand = &game.armor_stands[0];
+        assert_eq!(
+            stand.vehicle,
+            Some(root.id),
+            "the stand should ride the root"
+        );
+        let child = game
+            .falling
+            .iter()
+            .find(|falling| game.persist.falling_vehicles.get(&falling.id) == Some(&stand.id))
+            .expect("the nested falling block is the stand's passenger");
+        assert_eq!(
+            game.persist.falling_vehicles.get(&child.id),
+            Some(&stand.id)
+        );
     });
 }
