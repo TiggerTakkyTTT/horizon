@@ -1280,10 +1280,9 @@ impl Game<'_> {
                     .is_some()
                     .then_some(self.level.player_uuid)
                     .flatten(),
-                mods: round.listening() || !horizon_client::mod_api::mods().is_empty(),
                 ticking: &|| Box::new(self.entity_ticking_area()),
             };
-            let mut group = match islands.plan(&mobs, &snapshot, &turns) {
+            let mut group = match islands.plan(&mobs, &snapshot, &turns, &start) {
                 Some(plan) => islands.run(plan, mobs.into(), snapshot, start, &mut turns, &shared),
                 None => {
                     let mut group = mob_group::Group::new(mobs.into(), snapshot, start);
