@@ -4,6 +4,8 @@
 #[cfg(test)]
 mod anger_tests;
 mod display;
+#[cfg(test)]
+mod falling_passenger_tests;
 mod hurt_by_refs;
 
 use super::{FallingBlock, Game};
@@ -789,6 +791,12 @@ impl Game<'_> {
 
     /// A saved falling block.
     pub(super) fn load_falling(&mut self, tag: Tag, uuid: Option<[i32; 4]>) {
+        let mut tag = tag;
+        let passengers = if let Tag::Compound(c) = &mut tag {
+            c.remove(&"Passengers".into())
+        } else {
+            None
+        };
         if let Some((state, position, velocity, age, fall_distance)) =
             entity_nbt::falling_block_from_nbt(&tag)
             && let Some(state) =
@@ -826,6 +834,34 @@ impl Game<'_> {
                 ),
                 saved: Some(Box::new((uuid, tag.clone()))),
             });
+            if let Some(passengers) = passengers {
+                self.spawn_falling_non_mob_passengers(passengers);
+            }
+        }
+    }
+
+    /// `EntityType.loadEntityRecursive` also loads non-mob passengers. Most
+    /// of Horizon's vehicle support is intentionally mob-specific, but
+    /// falling-block contraptions commonly use armor stands and nested
+    /// falling blocks as a command chain. Spawn those entries independently
+    /// while keeping the mob rider path unchanged.
+    fn spawn_falling_non_mob_passengers(&mut self, passengers: Tag) {
+        let Tag::List(list) = passengers else { return };
+        for mut passenger in list {
+            let nested = if let Tag::Compound(c) = &mut passenger {
+                c.remove(&"Passengers".into())
+            } else {
+                None
+            };
+            let kind = entity_nbt::kind(&passenger).unwrap_or_default();
+            if self.res.mob_types().contains_key(&kind) {
+                continue;
+            }
+            if self.spawn_entity_from_nbt(passenger).is_some()
+                && let Some(nested) = nested
+            {
+                self.spawn_falling_non_mob_passengers(nested);
+            }
         }
     }
 
