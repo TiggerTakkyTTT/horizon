@@ -339,11 +339,13 @@ impl Game<'_> {
                 game.level_teleports
                     .push(super::server_travel::LevelTeleport {
                         conn,
+                        source: None,
                         dim: destination,
                         at,
                         rotation: Some(rotation),
                         vehicle: game.vehicle_by_uuid(mount),
                         cause: None,
+                        damage: None,
                     });
             }
             game.native_joins_flush(false, 0);

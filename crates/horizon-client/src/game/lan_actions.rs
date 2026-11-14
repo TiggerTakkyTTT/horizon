@@ -3173,11 +3173,13 @@ impl Game<'_> {
             self.level_teleports
                 .push(super::server_travel::LevelTeleport {
                     conn: own,
+                    source: None,
                     dim,
                     at,
                     rotation: Some([yaw, pitch]),
                     vehicle: None,
                     cause: Some("spectate"),
+                    damage: None,
                 });
             return;
         }

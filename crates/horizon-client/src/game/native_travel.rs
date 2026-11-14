@@ -83,11 +83,13 @@ impl Game<'_> {
             } else {
                 self.level_teleports.push(LevelTeleport {
                     conn,
+                    source: None,
                     dim,
                     at: pos,
                     rotation: Some(rotation),
                     vehicle: None,
                     cause: Some("unknown"),
+                    damage: None,
                 });
             }
             return true;
@@ -414,11 +416,13 @@ impl Game<'_> {
         } else {
             self.level_teleports.push(LevelTeleport {
                 conn,
+                source: None,
                 dim,
                 at: pos,
                 rotation: Some(rotation),
                 vehicle: None,
                 cause: Some("unknown"),
+                damage: None,
             });
         }
         true

@@ -676,7 +676,7 @@ impl Game<'_> {
                 present.insert(entity.id());
             }
             // Entity.processPortalCooldown still runs for entities this
-            // portal pass cannot send, such as an ender pearl.
+            // portal pass cannot send, such as a non-persistent wind charge.
             if entity.is_vehicle() == vehicles
                 && entity.portal_after_move() == after_move
                 && (can_sweep || has_portal_state)

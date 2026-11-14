@@ -1971,11 +1971,13 @@ impl Game<'_> {
         self.level_teleports
             .push(super::server_travel::LevelTeleport {
                 conn,
+                source: None,
                 dim: level,
                 at: pos,
                 rotation,
                 vehicle: None,
                 cause: Some("command"),
+                damage: None,
             });
         Ok(true)
     }
