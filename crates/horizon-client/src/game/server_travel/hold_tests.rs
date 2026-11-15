@@ -171,11 +171,13 @@ fn a_command_arrival_holds_movement_until_lit_then_ticks_damage_again() {
     // Exercise the queued command arrival without opening a second saved level.
     game.level_teleports.push(LevelTeleport {
         conn: CONN,
+        source: None,
         dim: game.dim,
         at,
         rotation: None,
         vehicle: None,
         cause: Some("command"),
+        damage: None,
     });
     game.run_level_teleports(&mut host);
     game.tick_server_travel(&mut host);

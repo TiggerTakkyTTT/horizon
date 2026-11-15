@@ -5623,6 +5623,14 @@ impl Game<'_> {
                         to = Vec3::new(target[0], target[1], target[2]);
                     }
                     if can_take && !cancel {
+                        // ThrownEnderpearl: 5% endermite where the player was
+                        // (when monsters spawn), before the cross-level move.
+                        if self.world.random.next_float() < 0.05
+                            && self.ui.rules.bool("spawn_monsters")
+                            && self.ui.difficulty != 0
+                        {
+                            self.spawn_mob_raw("minecraft:endermite", from, false);
+                        }
                         self.level_teleports
                             .push(super::server_travel::LevelTeleport {
                                 conn,
@@ -7864,6 +7872,10 @@ mod tests {
         .unwrap();
         assert_eq!(game.level_teleports.len(), 1);
         assert_eq!(
+            game.level_teleports[0].damage,
+            Some(("minecraft:ender_pearl", 5.0))
+        );
+        assert_eq!(
             game.level_teleports[0].source,
             Some(super::super::Dim::Nether)
         );
@@ -7874,7 +7886,176 @@ mod tests {
         let moved = host.hub.guests.iter().find(|g| g.conn == 2).unwrap();
         assert_eq!(moved.dimension, "minecraft:overworld");
         assert_eq!(moved.position, [target.x, target.y, target.z]);
-        assert_eq!(moved.health, 15.0);
+    }
+
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn an_ender_pearl_crosses_a_portal_before_moving_its_owner() {
+        use super::{Game, Hit, Projectile, ProjectileKind, Vec3, Who};
+        use crate::game::{Audio, Options, Progress, Settings, load_resources};
+        use horizon_client::chunk::Chunk;
+        use horizon_client::lan::{Joined, NetConfig, PlayerSender, guest::Guest, hub::HubConfig};
+        use horizon_protocol::packets::configuration::ClientInformation;
+        use std::sync::{Arc, atomic::AtomicI32, mpsc};
+
+        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+        game.lan_host(
+            crate::game::lan::LanSettings {
+                port: 0,
+                guest_commands: true,
+                force_game_mode: false,
+            },
+            NetConfig {
+                announce: false,
+                ..NetConfig::loopback(0, "pearl-crossing-test".into(), 2)
+            },
+            HubConfig {
+                default_game_mode: 0,
+                guest_commands: true,
+                force_game_mode: false,
+                hardcore: false,
+                view_distance: 2,
+                simulation_distance: 2,
+                dimension: "minecraft:overworld".into(),
+                allow_flight: false,
+                seed: 0,
+                max_players: 2,
+                integrated: false,
+                levels: Default::default(),
+            },
+        )
+        .unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut guest = Guest::new(
+            Joined {
+                conn: 2,
+                uuid: 114,
+                name: "PearlGuest".into(),
+                properties: Vec::new(),
+                info: ClientInformation::new(2),
+                brand: "test".into(),
+                sender: PlayerSender::new(tx, Arc::default()),
+                latency: Arc::new(AtomicI32::new(0)),
+                address: "127.0.0.1:25565".parse().unwrap(),
+                expected: false,
+                configured: Default::default(),
+            },
+            2,
+            [4.5, 70.0, 4.5],
+            2,
+        );
+        guest.dimension = "minecraft:the_nether".into();
+        guest.placed = true;
+        guest.loaded = true;
+        let uuid = horizon_client::lan::playerdata::uuid_ints(guest.uuid);
+        game.lan.as_mut().unwrap().hub.guests.push(guest);
+
+        // Tick the pearl through a real portal handoff, not directly into the hit handler.
+        game.enter_level(None, super::super::Dim::Nether).unwrap();
+        for x in -2..=2 {
+            for z in -2..=2 {
+                game.streaming
+                    .insert_remote(&mut game.world, Chunk::empty(x, z));
+            }
+        }
+        let portal = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:nether_portal")
+            .unwrap();
+        for x in 4..=5 {
+            for y in 70..=72 {
+                game.world.set(x, y, 4, portal).unwrap();
+            }
+        }
+        game.update_chunk_tickets();
+        let source = Vec3::new(4.5, 70.0, 4.5);
+        let mut pearl = Projectile::new(ProjectileKind::EnderPearl, source, Some(Who::Player));
+        pearl.id = 400;
+        pearl.guest = Some(2);
+        pearl.owner_uuid = Some(uuid);
+        game.creatures.projectiles.push(pearl);
+        game.find_entity_portals();
+        assert!(
+            game.creatures.projectiles.is_empty(),
+            "the pearl should be removed into the portal arrival queue"
+        );
+
+        // Land the serialized pearl in the overworld, then hit a block there.
+        game.enter_level(None, super::super::Dim::Overworld)
+            .unwrap();
+        for x in 0..=4 {
+            for z in 0..=4 {
+                game.streaming
+                    .insert_remote(&mut game.world, Chunk::empty(x, z));
+            }
+        }
+        for x in 36..=37 {
+            for y in 70..=72 {
+                game.world.set(x, y, 36, portal).unwrap();
+            }
+        }
+        game.land_portal_arrivals();
+        let mut pearl = game
+            .creatures
+            .projectiles
+            .pop()
+            .expect("the pearl should land in the overworld");
+        assert_eq!(pearl.owner, Some(Who::Player));
+        assert_eq!(pearl.guest, Some(2));
+        let target = pearl.position;
+        pearl.previous = target;
+        game.projectile_hit(
+            &pearl,
+            Hit::Block {
+                pos: [target.x as i32, target.y as i32, target.z as i32],
+                at: target,
+                face: [0; 3],
+            },
+        )
+        .unwrap();
+        assert_eq!(game.level_teleports.len(), 1);
+        assert_eq!(
+            game.level_teleports[0].damage,
+            Some(("minecraft:ender_pearl", 5.0))
+        );
+        assert_eq!(
+            game.level_teleports[0].source,
+            Some(super::super::Dim::Nether)
+        );
+        assert_eq!(game.level_teleports[0].dim, super::super::Dim::Overworld);
+
+        let mut host = game.lan.take().unwrap();
+        game.run_level_teleports(&mut host);
+        let moved = host.hub.guests.iter().find(|g| g.conn == 2).unwrap();
+        assert_eq!(moved.dimension, "minecraft:overworld");
     }
 
     #[test]
