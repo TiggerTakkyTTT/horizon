@@ -5587,15 +5587,27 @@ impl Game<'_> {
                 // swaps guests from the level currently being ticked, so
                 // carry the teleport through the server's level queue.
                 if p.owner == Some(Who::Player)
-                    && let Some(conn) = p.guest
-                    && let Some((owner_uuid, owner_name, from, owner_dim, can_take)) =
+                    && let Some((conn, owner_uuid, owner_name, from, owner_dim, can_take)) =
                         self.lan.as_ref().and_then(|host| {
+                            let conn = p.guest.or_else(|| {
+                                let owner = p.owner_uuid?;
+                                host.hub
+                                    .guests
+                                    .iter()
+                                    .find(|g| {
+                                        g.placed
+                                            && horizon_client::lan::playerdata::uuid_ints(g.uuid)
+                                                == owner
+                                    })
+                                    .map(|g| g.conn)
+                            })?;
                             host.hub
                                 .guests
                                 .iter()
                                 .find(|g| g.conn == conn && g.placed)
                                 .map(|g| {
                                     (
+                                        conn,
                                         g.uuid,
                                         g.name.clone(),
                                         g.position,
@@ -7884,6 +7896,128 @@ mod tests {
         let mut host = game.lan.take().unwrap();
         game.run_level_teleports(&mut host);
         let moved = host.hub.guests.iter().find(|g| g.conn == 2).unwrap();
+        assert_eq!(moved.dimension, "minecraft:overworld");
+        assert_eq!(moved.position, [target.x, target.y, target.z]);
+    }
+
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn an_ender_pearl_without_guest_conn_moves_the_host_owner() {
+        use super::{Game, Hit, Projectile, ProjectileKind, Vec3, Who};
+        use crate::game::{Audio, Options, Progress, Settings, load_resources};
+        use horizon_client::lan::{Joined, NetConfig, PlayerSender, guest::Guest, hub::HubConfig};
+        use horizon_protocol::packets::configuration::ClientInformation;
+        use std::sync::{Arc, atomic::AtomicI32, mpsc};
+
+        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+        game.lan_host(
+            crate::game::lan::LanSettings {
+                port: 0,
+                guest_commands: true,
+                force_game_mode: false,
+            },
+            NetConfig {
+                announce: false,
+                ..NetConfig::loopback(0, "host-pearl-cross-level-test".into(), 2)
+            },
+            HubConfig {
+                default_game_mode: 0,
+                guest_commands: true,
+                force_game_mode: false,
+                hardcore: false,
+                view_distance: 2,
+                simulation_distance: 2,
+                dimension: "minecraft:overworld".into(),
+                allow_flight: false,
+                seed: 0,
+                max_players: 2,
+                integrated: false,
+                levels: Default::default(),
+            },
+        )
+        .unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut host_player = Guest::new(
+            Joined {
+                conn: 0,
+                uuid: 114,
+                name: "HostPearl".into(),
+                properties: Vec::new(),
+                info: ClientInformation::new(2),
+                brand: "test".into(),
+                sender: PlayerSender::new(tx, Arc::default()),
+                latency: Arc::new(AtomicI32::new(0)),
+                address: "127.0.0.1:25565".parse().unwrap(),
+                expected: false,
+                configured: Default::default(),
+            },
+            2,
+            [4.5, 70.0, 4.5],
+            2,
+        );
+        host_player.dimension = "minecraft:the_nether".into();
+        host_player.placed = true;
+        host_player.loaded = true;
+        let uuid = horizon_client::lan::playerdata::uuid_ints(host_player.uuid);
+        let mut host = game.lan.take().unwrap();
+        host.hub.singleplayer_owner = Some(host_player.uuid);
+        host.hub.guests.push(host_player);
+        game.lan = Some(host);
+
+        let target = Vec3::new(12.5, 75.0, -3.5);
+        let mut pearl = Projectile::new(ProjectileKind::EnderPearl, target, Some(Who::Player));
+        pearl.owner_uuid = Some(uuid);
+        pearl.previous = target;
+        game.projectile_hit(
+            &pearl,
+            Hit::Block {
+                pos: [12, 75, -3],
+                at: target,
+                face: [0; 3],
+            },
+        )
+        .unwrap();
+        assert_eq!(game.level_teleports.len(), 1);
+        assert_eq!(game.level_teleports[0].conn, 0);
+        assert_eq!(
+            game.level_teleports[0].damage,
+            Some(("minecraft:ender_pearl", 5.0))
+        );
+        assert_eq!(
+            game.level_teleports[0].source,
+            Some(super::super::Dim::Nether)
+        );
+        assert_eq!(game.level_teleports[0].dim, super::super::Dim::Overworld);
+
+        let mut host = game.lan.take().unwrap();
+        game.run_level_teleports(&mut host);
+        let moved = host.hub.guests.iter().find(|g| g.conn == 0).unwrap();
         assert_eq!(moved.dimension, "minecraft:overworld");
         assert_eq!(moved.position, [target.x, target.y, target.z]);
     }
