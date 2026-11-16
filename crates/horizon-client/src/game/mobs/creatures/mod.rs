@@ -5914,7 +5914,7 @@ impl Game<'_> {
                 // swaps guests from the level currently being ticked, so
                 // carry the teleport through the server's level queue.
                 if p.owner == Some(Who::Player)
-                    && let Some((conn, owner_uuid, owner_name, from, owner_dim, can_take)) =
+                    && let Some((conn, owner_entity, from, owner_dim, can_take)) =
                         self.lan.as_ref().and_then(|host| {
                             let conn = p.guest.or_else(|| {
                                 let owner = p.owner_uuid?;
@@ -5935,10 +5935,9 @@ impl Game<'_> {
                                 .map(|g| {
                                     (
                                         conn,
-                                        g.uuid,
-                                        g.name.clone(),
+                                        g.entity_id,
                                         g.position,
-                                        super::Dim::from_id(&g.dimension),
+                                        Dim::from_id(&g.dimension),
                                         horizon_client::projectiles::owner_can_take_pearl(
                                             g.health > 0.0 && !g.dead && !g.spectator(),
                                             g.sleeping,
@@ -5949,15 +5948,20 @@ impl Game<'_> {
                     && owner_dim != self.dim
                 {
                     let mut target = [to.x, to.y, to.z];
-                    self.native_ender_pearl_teleport(
-                        owner_uuid,
-                        &owner_name,
-                        p.id,
-                        from,
-                        &mut target,
-                        &mut damage,
-                        &mut cancel,
-                    );
+                    if let Some(epoch) = self.native_lifecycle.epoch() {
+                        let owner = mod_api::EntityRef::new(epoch, owner_entity as u32);
+                        let (changed, new_damage, new_cancel) = self.native_pearl_teleport(
+                            owner,
+                            p.id,
+                            Vec3::new(from[0], from[1], from[2]),
+                            to,
+                            damage,
+                            hit,
+                        );
+                        target = changed;
+                        damage = new_damage;
+                        cancel |= new_cancel;
+                    }
                     if target.iter().all(|v| v.is_finite()) {
                         to = Vec3::new(target[0], target[1], target[2]);
                     }
@@ -5965,20 +5969,22 @@ impl Game<'_> {
                         // ThrownEnderpearl: 5% endermite where the player was
                         // (when monsters spawn), before the cross-level move.
                         if self.world.random.next_float() < 0.05
-                            && self.ui.rules.bool("spawn_monsters")
+                            && self
+                                .ui
+                                .rules
+                                .bool_at(horizon_client::gamerules::vanilla::SPAWN_MONSTERS)
                             && self.ui.difficulty != 0
                         {
                             self.spawn_mob_raw("minecraft:endermite", from, false);
                         }
                         self.level_teleports
-                            .push(super::server_travel::LevelTeleport {
+                            .push(crate::game::server_travel::LevelTeleport {
                                 conn,
                                 source: Some(owner_dim),
                                 dim: self.dim,
                                 at: [to.x, to.y, to.z],
                                 rotation: None,
                                 vehicle: None,
-                                cause: Some("ender_pearl"),
                                 damage: Some(("minecraft:ender_pearl", damage)),
                             });
                     }
@@ -9671,13 +9677,14 @@ mod tests {
         let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
-            root.clone(),
+            horizon_assets::resource_source::ResourceRoot::directory(root.clone()),
+            Vec::new(),
             None,
             &root,
             &settings,
             std::time::Instant::now(),
             false,
-            true,
+            crate::game::execution_role::ExecutionRole::IntegratedServer,
             &Progress::new(),
             &mut |_, _| unreachable!(),
         )
@@ -9691,7 +9698,9 @@ mod tests {
             loaded.gui.unwrap(),
             options,
             settings,
-            Audio::silent(&root),
+            Audio::silent(&horizon_assets::resource_source::ResourceSource::directory(
+                root.clone(),
+            )),
             None,
         )
         .unwrap();
@@ -9718,6 +9727,7 @@ mod tests {
                 max_players: 2,
                 integrated: false,
                 levels: Default::default(),
+                level_seeds: Default::default(),
             },
         )
         .unwrap();
@@ -9734,7 +9744,6 @@ mod tests {
                 latency: Arc::new(AtomicI32::new(0)),
                 address: "127.0.0.1:25565".parse().unwrap(),
                 expected: false,
-                configured: Default::default(),
             },
             2,
             [4.5, 70.0, 4.5],
@@ -9773,9 +9782,16 @@ mod tests {
         );
         assert_eq!(game.level_teleports[0].dim, super::super::Dim::Overworld);
 
-        let mut host = game.lan.take().unwrap();
-        game.run_level_teleports(&mut host);
-        let moved = host.hub.guests.iter().find(|g| g.conn == 2).unwrap();
+        game.run_level_teleports();
+        let moved = game
+            .lan
+            .as_ref()
+            .unwrap()
+            .hub
+            .guests
+            .iter()
+            .find(|g| g.conn == 2)
+            .unwrap();
         assert_eq!(moved.dimension, "minecraft:overworld");
         assert_eq!(moved.position, [target.x, target.y, target.z]);
     }
@@ -9792,13 +9808,14 @@ mod tests {
         let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
-            root.clone(),
+            horizon_assets::resource_source::ResourceRoot::directory(root.clone()),
+            Vec::new(),
             None,
             &root,
             &settings,
             std::time::Instant::now(),
             false,
-            true,
+            crate::game::execution_role::ExecutionRole::IntegratedServer,
             &Progress::new(),
             &mut |_, _| unreachable!(),
         )
@@ -9812,7 +9829,9 @@ mod tests {
             loaded.gui.unwrap(),
             options,
             settings,
-            Audio::silent(&root),
+            Audio::silent(&horizon_assets::resource_source::ResourceSource::directory(
+                root.clone(),
+            )),
             None,
         )
         .unwrap();
@@ -9839,6 +9858,7 @@ mod tests {
                 max_players: 2,
                 integrated: false,
                 levels: Default::default(),
+                level_seeds: Default::default(),
             },
         )
         .unwrap();
@@ -9855,7 +9875,6 @@ mod tests {
                 latency: Arc::new(AtomicI32::new(0)),
                 address: "127.0.0.1:25565".parse().unwrap(),
                 expected: false,
-                configured: Default::default(),
             },
             2,
             [4.5, 70.0, 4.5],
@@ -9895,9 +9914,16 @@ mod tests {
         );
         assert_eq!(game.level_teleports[0].dim, super::super::Dim::Overworld);
 
-        let mut host = game.lan.take().unwrap();
-        game.run_level_teleports(&mut host);
-        let moved = host.hub.guests.iter().find(|g| g.conn == 0).unwrap();
+        game.run_level_teleports();
+        let moved = game
+            .lan
+            .as_ref()
+            .unwrap()
+            .hub
+            .guests
+            .iter()
+            .find(|g| g.conn == 0)
+            .unwrap();
         assert_eq!(moved.dimension, "minecraft:overworld");
         assert_eq!(moved.position, [target.x, target.y, target.z]);
     }
@@ -9915,13 +9941,14 @@ mod tests {
         let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
-            root.clone(),
+            horizon_assets::resource_source::ResourceRoot::directory(root.clone()),
+            Vec::new(),
             None,
             &root,
             &settings,
             std::time::Instant::now(),
             false,
-            true,
+            crate::game::execution_role::ExecutionRole::IntegratedServer,
             &Progress::new(),
             &mut |_, _| unreachable!(),
         )
@@ -9935,7 +9962,9 @@ mod tests {
             loaded.gui.unwrap(),
             options,
             settings,
-            Audio::silent(&root),
+            Audio::silent(&horizon_assets::resource_source::ResourceSource::directory(
+                root.clone(),
+            )),
             None,
         )
         .unwrap();
@@ -9962,6 +9991,7 @@ mod tests {
                 max_players: 2,
                 integrated: false,
                 levels: Default::default(),
+                level_seeds: Default::default(),
             },
         )
         .unwrap();
@@ -9978,7 +10008,6 @@ mod tests {
                 latency: Arc::new(AtomicI32::new(0)),
                 address: "127.0.0.1:25565".parse().unwrap(),
                 expected: false,
-                configured: Default::default(),
             },
             2,
             [4.5, 70.0, 4.5],
@@ -9991,7 +10020,7 @@ mod tests {
         game.lan.as_mut().unwrap().hub.guests.push(guest);
 
         // Tick the pearl through a real portal handoff, not directly into the hit handler.
-        game.enter_level(None, super::super::Dim::Nether).unwrap();
+        game.enter_level(super::super::Dim::Nether).unwrap();
         for x in -2..=2 {
             for z in -2..=2 {
                 game.streaming
@@ -10023,7 +10052,7 @@ mod tests {
         );
 
         // Land the serialized pearl in the overworld, then hit a block there.
-        game.enter_level(None, super::super::Dim::Overworld)
+        game.enter_level(super::super::Dim::Overworld)
             .unwrap();
         for x in 0..=4 {
             for z in 0..=4 {
@@ -10066,9 +10095,16 @@ mod tests {
         );
         assert_eq!(game.level_teleports[0].dim, super::super::Dim::Overworld);
 
-        let mut host = game.lan.take().unwrap();
-        game.run_level_teleports(&mut host);
-        let moved = host.hub.guests.iter().find(|g| g.conn == 2).unwrap();
+        game.run_level_teleports();
+        let moved = game
+            .lan
+            .as_ref()
+            .unwrap()
+            .hub
+            .guests
+            .iter()
+            .find(|g| g.conn == 2)
+            .unwrap();
         assert_eq!(moved.dimension, "minecraft:overworld");
     }
 

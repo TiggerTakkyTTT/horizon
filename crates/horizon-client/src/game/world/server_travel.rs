@@ -211,11 +211,16 @@ fn take_vehicle<
 /// the rotation it sets (none keeps the player's).
 pub(super) struct LevelTeleport {
     pub conn: u32,
+    /// The level the player currently occupies when the request was queued.
+    /// None means the level in place when the queue is drained.
+    pub source: Option<Dim>,
     pub dim: Dim,
     pub at: [f64; 3],
     pub rotation: Option<[f32; 2]>,
     /// `TeleportTransition.asPassenger`: the vehicle already moved with its tree.
     pub vehicle: Option<u32>,
+    /// Damage dealt after the player arrives, as with an ender pearl.
+    pub damage: Option<(&'static str, f32)>,
 }
 
 /// A teleport a command made inside a level: told to the mods once it has
@@ -1108,6 +1113,8 @@ impl Game<'_> {
             at,
             rotation: None,
             vehicle: None,
+            source: None,
+            damage: None,
         });
         self.run_level_teleports();
         self.world_spawn_trip(conn, Some(missing));
@@ -1493,13 +1500,18 @@ impl Game<'_> {
             return;
         }
         for t in std::mem::take(&mut self.level_teleports) {
+            let restore = self.dim;
+            let source = t.source.unwrap_or(restore);
+            if self.dim != source && let Err(e) = self.enter_level(source) {
+                log::error!("could not open {}: {e}", source.id());
+                continue;
+            }
             let Some(host) = self.lan.as_mut() else {
                 return;
             };
             let Some(i) = host.hub.guests.iter().position(|g| g.conn == t.conn) else {
                 continue;
             };
-            let source = self.dim;
             if t.dim != source {
                 drop_hook(host, t.conn);
             }
@@ -1543,7 +1555,14 @@ impl Game<'_> {
                 // The mods hear the teleport into another level, with the
                 // player's state swapped in.
                 g.native_player_teleported(uuid, &name, origin, t.at, t.dim.id());
+                if let Some((kind, amount)) = t.damage && amount > 0.0 {
+                    g.hurt_player_by(kind, amount);
+                }
             });
+            if t.damage.is_some() {
+                self.audio
+                    .play("minecraft:entity.player.teleport", Some(t.at), 1.0, 1.0);
+            }
             self.server_trips.retain(|trip| !trip.is(t.conn));
             self.server_trips.push(Trip {
                 conn: t.conn,
@@ -1567,8 +1586,8 @@ impl Game<'_> {
                 hold: true,
                 left: Some(source),
             });
-            if let Err(e) = self.enter_level(source) {
-                log::error!("could not reopen {}: {e}", source.id());
+            if let Err(e) = self.enter_level(restore) {
+                log::error!("could not reopen {}: {e}", restore.id());
             }
         }
     }
