@@ -4385,6 +4385,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn tamable_owner_is_sent_and_can_be_cleared() {
         let hub = meta_hub("TamableOwnerMetaTest");
         let owner = [1, 2, 3, 4];
