@@ -114,8 +114,8 @@ pub fn started(shared: &Shared) {
 
 /// The notification a typed event of the game is, if vanilla sends one for it: a player who joined or left
 /// (`playerJoined`, `playerLeft`, with the player as a `PlayerDto`), a world save that began or ended
-/// (`serverSaveStarted`, `serverSaveCompleted`), and a change of the operators, the allowlist, the bans or the
-/// IP bans.
+/// (`serverSaveStarted`, `serverSaveCompleted`), world upgrades, and a change of the operators, the allowlist,
+/// the bans or the IP bans.
 pub fn game_event(shared: &Shared, kind: &str, event: &Value) {
     let player = || Some(json!({ "id": event["uuid"], "name": event["name"] }));
     let (method, params) = match kind {
@@ -123,6 +123,16 @@ pub fn game_event(shared: &Shared, kind: &str, event: &Value) {
         "leave" => ("notification/players/left", player()),
         "saving" => ("notification/server/saving", None),
         "saved" => ("notification/server/saved", None),
+        "world_upgrade_started" => ("notification/world/upgrade_started", None),
+        "world_upgrade_progress" => (
+            "notification/world/upgrade_progress",
+            event.get("progress").cloned(),
+        ),
+        "world_upgrade_finished" => ("notification/world/upgrade_finished", None),
+        "world_upgrade_failed" => (
+            "notification/world/upgrade_failed",
+            event.get("reason").cloned(),
+        ),
         // `ServerActivityMonitor.reportLoginActivity`: a login attempt, told at most once in thirty seconds.
         "login_activity" => {
             if activity_due(shared, Instant::now()) {
@@ -994,6 +1004,18 @@ mod tests {
         game_event(&shared, "saving", &json!({ "type": "saving" }));
         game_event(&shared, "saved", &json!({ "type": "saved" }));
         game_event(&shared, "leave", &json!({ "name": "Kim0", "uuid": id }));
+        game_event(&shared, "world_upgrade_started", &json!({}));
+        game_event(
+            &shared,
+            "world_upgrade_progress",
+            &json!({ "progress": 0.5 }),
+        );
+        game_event(&shared, "world_upgrade_finished", &json!({}));
+        game_event(
+            &shared,
+            "world_upgrade_failed",
+            &json!({ "reason": "World upgrade failed" }),
+        );
         // The chat is not a notification; the rest come in order, the player as a `PlayerDto`.
         let player = format!(r#"[{{"id":"{id}","name":"Kim0"}}]"#);
         assert_eq!(
@@ -1015,6 +1037,22 @@ mod tests {
             format!(
                 r#"{{"jsonrpc":"2.0","method":"minecraft:notification/players/left","params":{player}}}"#
             )
+        );
+        assert_eq!(
+            next_text(&mut client),
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_started"}"#
+        );
+        assert_eq!(
+            next_text(&mut client),
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_progress","params":[0.5]}"#
+        );
+        assert_eq!(
+            next_text(&mut client),
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_finished"}"#
+        );
+        assert_eq!(
+            next_text(&mut client),
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_failed","params":["World upgrade failed"]}"#
         );
         // A change of a list reaches the client with its one parameter (the player, for an allowlist).
         game_event(
@@ -1127,6 +1165,10 @@ mod tests {
             "notification/server/stopping",
             "notification/server/saving",
             "notification/server/saved",
+            "notification/world/upgrade_started",
+            "notification/world/upgrade_progress",
+            "notification/world/upgrade_finished",
+            "notification/world/upgrade_failed",
             "notification/players/joined",
             "notification/players/left",
             "notification/operators/added",
