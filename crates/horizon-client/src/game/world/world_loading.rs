@@ -400,7 +400,8 @@ fn upgrade_world(
     );
     let stop = std::sync::atomic::AtomicBool::new(false);
     let result = std::thread::scope(|scope| {
-        let watcher = scope.spawn(|| {
+        let watcher = horizon_guest_stack::builder()
+            .spawn_scoped(scope, || {
             let mut last_progress = 0.0;
             let mut last_sent = std::time::Instant::now();
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -418,7 +419,8 @@ fn upgrade_world(
                     last_sent = now;
                 }
             }
-        });
+            })
+            .expect("world upgrade progress watcher");
         let result = horizon_client::save::upgrade_older_world_with(save_root, upgrade);
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         watcher.join().expect("world upgrade progress watcher");
