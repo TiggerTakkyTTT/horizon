@@ -672,7 +672,7 @@ fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::{BufRead, Read, Write};
 
     const SECRET: &str = "abcdefghijABCDEFGHIJ0123456789abcdefghij";
 
@@ -984,6 +984,81 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(shared.management.sockets.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn startup_upgrade_events_reach_a_management_client() {
+        use std::net::TcpListener;
+
+        let shared = shared();
+        std::fs::create_dir_all(shared.dir.join(".horizon")).unwrap();
+        let address = listen_on(shared.clone(), settings());
+        let mut client = upgrade(address);
+        registered(&shared, 1);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::fs::write(
+            horizon_server_launch::control_path(&shared.dir),
+            json!({"port": port, "token": "startup-token"}).to_string(),
+        )
+        .unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), "auth startup-token");
+            writeln!(socket, "{{\"ok\":true}}").unwrap();
+            for (seq, event) in [
+                (1, json!({"type": "world_upgrade_started"})),
+                (
+                    2,
+                    json!({"type": "world_upgrade_progress", "progress": 0.5}),
+                ),
+                (3, json!({"type": "world_upgrade_finished"})),
+                (
+                    4,
+                    json!({
+                        "type": "world_upgrade_failed",
+                        "reason": "World upgrade failed"
+                    }),
+                ),
+            ] {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with("server-events "), "{line}");
+                if matches!(seq, 2 | 4) {
+                    std::thread::sleep(Duration::from_millis(350));
+                }
+                let mut event = event;
+                event["seq"] = seq.into();
+                writeln!(socket, "{}", json!({"next": seq, "events": [event]})).unwrap();
+            }
+        });
+
+        {
+            let mut state = shared.state.lock().unwrap();
+            state.phase = Phase::Starting;
+            state.engine_pid = Some(42);
+        }
+        crate::events::poll_game(shared.clone());
+        for expected in [
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_started"}"#,
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_progress","params":[0.5]}"#,
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_finished"}"#,
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_failed","params":["World upgrade failed"]}"#,
+        ] {
+            assert_eq!(next_text(&mut client), expected);
+        }
+        shared.set_phase(Phase::Stopped);
+        peer.join().unwrap();
+        drop(client);
+        std::fs::remove_dir_all(&shared.dir).unwrap();
     }
 
     #[test]
