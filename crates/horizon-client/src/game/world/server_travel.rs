@@ -1491,6 +1491,19 @@ impl Game<'_> {
         }
     }
 
+    /// Return to the level that was active before processing one queued command teleport.
+    /// A failed source or destination open must not leave the server ticking a parked level.
+    fn restore_level_after_teleport(&mut self, restore: Dim) -> bool {
+        if self.dim == restore {
+            return true;
+        }
+        if let Err(e) = self.enter_level(restore) {
+            log::error!("could not reopen {}: {e}", restore.id());
+            return false;
+        }
+        true
+    }
+
     /// The players the command just run sends to another level
     /// (`ServerPlayer.teleport` from TeleportCommand): a Respawn packet
     /// keeping all data and the teleport, with no portal sound. The server
@@ -1504,12 +1517,19 @@ impl Game<'_> {
             let source = t.source.unwrap_or(restore);
             if self.dim != source && let Err(e) = self.enter_level(source) {
                 log::error!("could not open {}: {e}", source.id());
+                if !self.restore_level_after_teleport(restore) {
+                    break;
+                }
                 continue;
             }
             let Some(host) = self.lan.as_mut() else {
+                self.restore_level_after_teleport(restore);
                 return;
             };
             let Some(i) = host.hub.guests.iter().position(|g| g.conn == t.conn) else {
+                if !self.restore_level_after_teleport(restore) {
+                    break;
+                }
                 continue;
             };
             if t.dim != source {
@@ -1517,9 +1537,13 @@ impl Game<'_> {
             }
             if let Err(e) = self.enter_level(t.dim) {
                 log::error!("could not open {}: {e}", t.dim.id());
+                if !self.restore_level_after_teleport(restore) {
+                    break;
+                }
                 continue;
             }
             let Some(host) = self.lan.as_mut() else {
+                self.restore_level_after_teleport(restore);
                 return;
             };
             let (uuid, name) = (host.hub.guests[i].uuid, host.hub.guests[i].name.clone());
@@ -1586,8 +1610,8 @@ impl Game<'_> {
                 hold: true,
                 left: Some(source),
             });
-            if let Err(e) = self.enter_level(restore) {
-                log::error!("could not reopen {}: {e}", restore.id());
+            if !self.restore_level_after_teleport(restore) {
+                break;
             }
         }
     }
@@ -1643,6 +1667,27 @@ mod tests {
     use super::*;
     use mod_api::ServerHost;
     use std::sync::Arc;
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_failed_level_teleport_restores_the_active_level() {
+        super::super::native_guest_turn_tests::with_guests(|game| {
+            let restore = game.dim;
+            game.level_teleports.push(LevelTeleport {
+                conn: 99,
+                dim: Dim::Nether,
+                at: [0.5, 64.0, 0.5],
+                rotation: None,
+                vehicle: None,
+                source: Some(Dim::Nether),
+                damage: None,
+            });
+
+            game.run_level_teleports();
+
+            assert_eq!(game.dim, restore);
+        });
+    }
 
     #[test]
     #[ignore = "daily"]
