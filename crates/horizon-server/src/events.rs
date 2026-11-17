@@ -71,18 +71,21 @@ impl Shared {
     }
 }
 
-/// Fetches the game's typed events (`server-events` on its control endpoint) while it runs.
+/// Fetches the game's typed events (`server-events` on its control endpoint) while it starts or runs.
 pub fn poll_game(shared: Arc<Shared>) {
     let _ = thread::Builder::new().name("events".into()).spawn(move || {
         let mut control: Option<(u32, engine::Control)> = None;
         let mut since = 0u64;
         loop {
             thread::sleep(POLL);
-            let (pid, running) = {
+            let (pid, pollable) = {
                 let state = shared.state.lock().unwrap();
-                (state.engine_pid, state.phase == Phase::Running)
+                (
+                    state.engine_pid,
+                    matches!(state.phase, Phase::Starting | Phase::Running),
+                )
             };
-            let (Some(pid), true) = (pid, running) else {
+            let (Some(pid), true) = (pid, pollable) else {
                 control = None;
                 continue;
             };
@@ -194,6 +197,95 @@ pub fn route(shared: &Arc<Shared>, request: &Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "daily"]
+    fn startup_upgrade_events_reach_management_clients_before_running() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-server-startup-events-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".horizon")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::fs::write(
+            horizon_server_launch::control_path(&dir),
+            json!({"port": port, "token": "startup-token"}).to_string(),
+        )
+        .unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), "auth startup-token");
+            writeln!(socket, "{{\"ok\":true}}").unwrap();
+            for (seq, event) in [
+                (1, json!({"type": "world_upgrade_started"})),
+                (
+                    2,
+                    json!({"type": "world_upgrade_progress", "progress": 0.5}),
+                ),
+                (3, json!({"type": "world_upgrade_finished"})),
+                (
+                    4,
+                    json!({
+                        "type": "world_upgrade_failed",
+                        "reason": "World upgrade failed"
+                    }),
+                ),
+            ] {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with("server-events "), "{line}");
+                let mut event = event;
+                event["seq"] = seq.into();
+                writeln!(socket, "{}", json!({"next": seq, "events": [event]})).unwrap();
+            }
+        });
+
+        let shared = Shared::with_install(&dir, None);
+        {
+            let mut state = shared.state.lock().unwrap();
+            state.phase = Phase::Starting;
+            state.engine_pid = Some(42);
+        }
+        poll_game(shared.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let kinds: Vec<String> = {
+                let events = shared.events.lock().unwrap();
+                events
+                    .kept
+                    .iter()
+                    .filter_map(|event| event["type"].as_str().map(str::to_owned))
+                    .collect()
+            };
+            if kinds.ends_with(&[
+                "world_upgrade_started".into(),
+                "world_upgrade_progress".into(),
+                "world_upgrade_finished".into(),
+                "world_upgrade_failed".into(),
+            ]) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "startup events were not forwarded: {kinds:?}"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        shared.set_phase(Phase::Stopped);
+        peer.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn event_reply(response: Response) -> Value {
         assert!(response.stream.is_none());
