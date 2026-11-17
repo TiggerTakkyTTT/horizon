@@ -125,6 +125,7 @@ answer; those fields now live only under `provenance`.
   supervisor.
 - Vanilla's management protocol (`management-server-*`): the WebSocket, its authentication, `rpc.discover`,
   `players`, `players/kick`, `server/{status,save,stop,system_message}`, and the four lists' getters.
+  A kick's translatable message is sent as its key.
 - Vanilla's management protocol's live settings (`serversettings/*`), including changes persisted to
   `server.properties` where vanilla persists them.
 - Vanilla's management protocol's world-upgrade notifications: `world/upgrade_started`,
