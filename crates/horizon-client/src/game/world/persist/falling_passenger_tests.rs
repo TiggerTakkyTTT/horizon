@@ -55,7 +55,7 @@ fn with_game(test: impl FnOnce(&mut Game<'_>)) {
 }
 
 #[test]
-#[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES and a scratch HORIZON_HOME"]
+#[ignore = "daily"]
 fn summon_falling_block_loads_non_mob_passengers() {
     with_game(|game| {
         assert!(game.run_command(
