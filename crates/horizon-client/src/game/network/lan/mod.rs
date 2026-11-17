@@ -4390,9 +4390,8 @@ mod tests {
         let owner = [1, 2, 3, 4];
         let expected = Value::OptUuid(Some(0x00000001000000020000000300000004));
         for kind in ["minecraft:parrot", "minecraft:cat", "minecraft:wolf"] {
-            let Some(mut mob) = mob_of(kind) else {
-                return;
-            };
+            let mut mob = mob_of(kind)
+                .unwrap_or_else(|| panic!("prepared mob data missing for {kind}"));
             mob.extra.tame = true;
             mob.extra.owner = Some(owner);
             let metadata = |mob: &Mob| {
