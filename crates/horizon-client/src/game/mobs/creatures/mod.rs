@@ -9666,7 +9666,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    #[ignore = "daily"]
     fn an_ender_pearl_landing_in_another_level_moves_its_owner() {
         use super::{Game, Hit, Projectile, ProjectileKind, Vec3, Who};
         use crate::game::{Audio, Options, Progress, Settings, load_resources};
@@ -9797,7 +9797,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    #[ignore = "daily"]
     fn an_ender_pearl_without_guest_conn_moves_the_host_owner() {
         use super::{Game, Hit, Projectile, ProjectileKind, Vec3, Who};
         use crate::game::{Audio, Options, Progress, Settings, load_resources};
@@ -9929,7 +9929,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    #[ignore = "daily"]
     fn an_ender_pearl_crosses_a_portal_before_moving_its_owner() {
         use super::{Game, Hit, Projectile, ProjectileKind, Vec3, Who};
         use crate::game::{Audio, Options, Progress, Settings, load_resources};
