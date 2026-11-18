@@ -34,6 +34,17 @@ fn locks_out(origin: input_trace::InputOrigin, scripted: bool, event: &WindowEve
     scripted && origin == input_trace::InputOrigin::User && is_input(event)
 }
 
+/// Linux can drop a confined pointer grab while a touchpad is moving and a
+/// movement key is held. Reassert it on the next key press as well as on the
+/// pointer events that already did so.
+pub(super) fn should_reassert_pointer_capture(event: &WindowEvent) -> bool {
+    match event {
+        WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => true,
+        WindowEvent::KeyboardInput { event, .. } => event.state == ElementState::Pressed,
+        _ => false,
+    }
+}
+
 /// A person clicking into the window or away from it during a scripted run. A replay's look and
 /// clicks act by the focus and the pointer grab, which that would change mid-run: the run keeps
 /// the focus it started with, and the last change applies once it ends (`settle_after_run`).
@@ -426,6 +437,16 @@ mod tests {
             WindowEvent::ModifiersChanged(Modifiers::from(ModifiersState::empty())),
             WindowEvent::Ime(Ime::Commit("a".into())),
         ]
+    }
+
+    #[test]
+    fn pointer_capture_reasserts_for_pointer_events_but_not_cursor_moves() {
+        let events = inputs();
+        assert!(should_reassert_pointer_capture(&events[0]));
+        assert!(should_reassert_pointer_capture(&events[1]));
+        assert!(!should_reassert_pointer_capture(&events[2]));
+        assert!(!should_reassert_pointer_capture(&events[3]));
+        assert!(!should_reassert_pointer_capture(&events[4]));
     }
 
     #[test]
