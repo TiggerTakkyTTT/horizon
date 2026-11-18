@@ -5259,6 +5259,42 @@ impl Game<'_> {
         });
     }
 
+    /// `ThrownEnderpearl.onHit`: the five-percent endermite roll and spawn use
+    /// the pearl owner's source level, even when the pearl landed elsewhere.
+    /// Return false if the active level could not be restored for the caller.
+    fn spawn_pearl_endermite(&mut self, owner_dim: Dim, from: [f64; 3]) -> bool {
+        let restore = self.dim;
+        if owner_dim != restore && let Err(e) = self.enter_level(owner_dim) {
+            log::error!("could not open {} for an endermite spawn: {e}", owner_dim.id());
+            return false;
+        }
+        if self.world.random.next_float() < 0.05
+            && self
+                .ui
+                .rules
+                .bool_at(horizon_client::gamerules::vanilla::SPAWN_MONSTERS)
+            && self.ui.difficulty != 0
+        {
+            self.spawn_mob_raw("minecraft:endermite", from, false);
+        }
+        if !self.restore_level_after_pearl(owner_dim, restore) {
+            return false;
+        }
+        true
+    }
+
+    /// Restore the level temporarily left for a pearl-side effect.
+    fn restore_level_after_pearl(&mut self, from: Dim, restore: Dim) -> bool {
+        if from == restore || self.dim == restore {
+            return true;
+        }
+        if let Err(e) = self.enter_level(restore) {
+            log::error!("could not restore {} after a pearl-side effect: {e}", restore.id());
+            return false;
+        }
+        true
+    }
+
     /// A projectile's hit, landed in the attack of its owner.
     pub(super) fn projectile_hit(&mut self, p: &Projectile, hit: Hit) -> Result<()> {
         let attack = self.projectile_attack(p);
@@ -5892,65 +5928,79 @@ impl Game<'_> {
                 let mut to = p.previous;
                 let mut damage = 5.0;
                 let mut cancel = false;
-                // EntityTeleportEvent.EnderPearl: a server player's pearl.
-                if p.owner == Some(Who::Player)
-                    && let Some(from) = self.player.as_ref().map(|pl| pl.position)
-                    && let Some(owner) = self.native_acting_player().map(|player| player.entity())
-                {
-                    let dimension = self.dim;
-                    let target;
-                    (target, damage, cancel) =
-                        self.native_pearl_teleport(owner, p.id, from, to, damage, hit);
-                    cancel |= self.dim != dimension
-                        || self.player.as_ref().is_none_or(|pl| pl.position != from)
-                        || self.native_acting_player().map(|player| player.entity()) != Some(owner);
-                    // A target that is not a number keeps the pearl's.
-                    if target.iter().all(|v| v.is_finite()) {
-                        to = Vec3::new(target[0], target[1], target[2]);
-                    }
-                }
                 // A pearl can land in a level other than its owner's. The
                 // normal guest swap cannot reach that player because it only
                 // swaps guests from the level currently being ticked, so
                 // carry the teleport through the server's level queue.
-                if p.owner == Some(Who::Player)
-                    && let Some((conn, owner_entity, from, owner_dim, can_take)) =
-                        self.lan.as_ref().and_then(|host| {
-                            let conn = p.guest.or_else(|| {
-                                let owner = p.owner_uuid?;
-                                host.hub
-                                    .guests
-                                    .iter()
-                                    .find(|g| {
-                                        g.placed
-                                            && horizon_client::lan::playerdata::uuid_ints(g.uuid)
-                                                == owner
-                                    })
-                                    .map(|g| g.conn)
-                            })?;
+                let player_owner = if p.owner == Some(Who::Player) {
+                    let cross_level = self.lan.as_ref().and_then(|host| {
+                        let conn = p.guest.or_else(|| {
+                            let owner = p.owner_uuid?;
                             host.hub
                                 .guests
                                 .iter()
-                                .find(|g| g.conn == conn && g.placed)
-                                .map(|g| {
-                                    (
-                                        conn,
-                                        g.entity_id,
-                                        g.position,
-                                        Dim::from_id(&g.dimension),
-                                        horizon_client::projectiles::owner_can_take_pearl(
-                                            g.health > 0.0 && !g.dead && !g.spectator(),
-                                            g.sleeping,
-                                        ),
-                                    )
+                                .find(|g| {
+                                    g.placed
+                                        && horizon_client::lan::playerdata::uuid_ints(g.uuid)
+                                            == owner
                                 })
-                        })
-                    && owner_dim != self.dim
-                {
-                    let mut target = [to.x, to.y, to.z];
-                    if let Some(epoch) = self.native_lifecycle.epoch() {
-                        let owner = mod_api::EntityRef::new(epoch, owner_entity as u32);
-                        let (changed, new_damage, new_cancel) = self.native_pearl_teleport(
+                                .map(|g| g.conn)
+                        })?;
+                        host.hub
+                            .guests
+                            .iter()
+                            .find(|g| g.conn == conn && g.placed)
+                            .map(|g| {
+                                (
+                                    Some(conn),
+                                    Some(g.entity_id),
+                                    g.position,
+                                    Dim::from_id(&g.dimension),
+                                    horizon_client::projectiles::owner_can_take_pearl(
+                                        g.health > 0.0 && !g.dead && !g.spectator(),
+                                        g.sleeping,
+                                    ),
+                                )
+                            })
+                            .filter(|(_, _, _, owner_dim, _)| *owner_dim != self.dim)
+                    });
+                    cross_level.or_else(|| {
+                        // Only the player currently in the game state can use
+                        // the local path. A pearl belonging to another player
+                        // must not inherit this player's hook decision.
+                        if p.guest.is_some_and(|conn| self.lan_acting != Some(conn)) {
+                            return None;
+                        }
+                        let from = self.player.as_ref()?.position.components();
+                        let owner = self
+                            .native_acting_player()
+                            .map(|player| player.entity().id() as i32);
+                        Some((
+                            None,
+                            owner,
+                            from,
+                            self.dim,
+                            horizon_client::projectiles::owner_can_take_pearl(
+                                !self.player.as_ref()?.health.dead_or_dying(),
+                                self.sleeping.is_some(),
+                            ),
+                        ))
+                    })
+                } else {
+                    None
+                };
+                if let Some((conn, owner_entity, from, owner_dim, can_take)) = player_owner {
+                    // Resolve the owner before dispatching the hook. The hook
+                    // must run once for this owner, not once for whoever is
+                    // temporarily in `self.player` and once again for them.
+                    let dimension = self.dim;
+                    let owner = owner_entity.and_then(|owner_entity| {
+                        self.native_lifecycle
+                            .epoch()
+                            .map(|epoch| mod_api::EntityRef::new(epoch, owner_entity as u32))
+                    });
+                    if let Some(owner) = owner {
+                        let (target, new_damage, new_cancel) = self.native_pearl_teleport(
                             owner,
                             p.id,
                             Vec3::new(from[0], from[1], from[2]),
@@ -5958,28 +6008,28 @@ impl Game<'_> {
                             damage,
                             hit,
                         );
-                        target = changed;
                         damage = new_damage;
-                        cancel |= new_cancel;
-                    }
-                    if target.iter().all(|v| v.is_finite()) {
-                        to = Vec3::new(target[0], target[1], target[2]);
-                    }
-                    if can_take && !cancel {
-                        // ThrownEnderpearl: 5% endermite where the player was
-                        // (when monsters spawn), before the cross-level move.
-                        if self.world.random.next_float() < 0.05
-                            && self
-                                .ui
-                                .rules
-                                .bool_at(horizon_client::gamerules::vanilla::SPAWN_MONSTERS)
-                            && self.ui.difficulty != 0
-                        {
-                            self.spawn_mob_raw("minecraft:endermite", from, false);
+                        cancel = new_cancel;
+                        if owner_dim == dimension {
+                            cancel |= self.dim != dimension
+                                || self
+                                    .player
+                                    .as_ref()
+                                    .is_none_or(|pl| pl.position.components() != from)
+                                || self.native_acting_player().map(|player| player.entity())
+                                    != Some(owner);
                         }
-                        self.level_teleports
-                            .push(crate::game::server_travel::LevelTeleport {
-                                conn,
+                        if target.iter().all(|v| v.is_finite()) {
+                            to = Vec3::new(target[0], target[1], target[2]);
+                        }
+                    }
+                    if owner_dim != self.dim {
+                        if can_take && !cancel {
+                            if !self.spawn_pearl_endermite(owner_dim, from) {
+                                return Ok(());
+                            }
+                            self.level_teleports.push(crate::game::server_travel::LevelTeleport {
+                                conn: conn.expect("cross-level player owner has a connection"),
                                 source: Some(owner_dim),
                                 dim: self.dim,
                                 at: [to.x, to.y, to.z],
@@ -5987,42 +6037,28 @@ impl Game<'_> {
                                 vehicle: None,
                                 damage: Some(("minecraft:ender_pearl", damage)),
                             });
+                        }
+                        return Ok(());
+                    }
+                    if can_take && !cancel {
+                        if !self.spawn_pearl_endermite(owner_dim, from) {
+                            return Ok(());
+                        }
+                        // ServerPlayer.teleport: removeVehicle before the placement.
+                        section_steps::teleport_player(self, to);
+                        self.hurt_player_by("minecraft:ender_pearl", damage);
+                        self.audio.play(
+                            "minecraft:entity.player.teleport",
+                            Some([to.x, to.y, to.z]),
+                            1.0,
+                            1.0,
+                        );
                     }
                     return Ok(());
                 }
                 // ThrownEnderpearl.isAllowedToTeleportOwner: an owner who is
                 // dead or asleep cannot take the pearl, so it is discarded
                 // where it lands (no teleport and no 5 damage).
-                let taken = self.player.as_ref().is_some_and(|pl| {
-                    horizon_client::projectiles::owner_can_take_pearl(
-                        !pl.health.dead_or_dying(),
-                        self.sleeping.is_some(),
-                    )
-                });
-                if p.owner == Some(Who::Player) && taken && !cancel {
-                    // ThrownEnderpearl: 5% endermite where the player was
-                    // (when monsters spawn), teleport, 5 damage.
-                    if self.world.random.next_float() < 0.05
-                        && self
-                            .ui
-                            .rules
-                            .bool_at(horizon_client::gamerules::vanilla::SPAWN_MONSTERS)
-                        && self.ui.difficulty != 0
-                        && let Some(pl) = self.player.as_ref()
-                    {
-                        let from = pl.position;
-                        self.spawn_mob_raw("minecraft:endermite", [from.x, from.y, from.z], false);
-                    }
-                    // ServerPlayer.teleport: removeVehicle before the placement.
-                    section_steps::teleport_player(self, to);
-                    self.hurt_player_by("minecraft:ender_pearl", damage);
-                    self.audio.play(
-                        "minecraft:entity.player.teleport",
-                        Some([to.x, to.y, to.z]),
-                        1.0,
-                        1.0,
-                    );
-                }
                 if let Some(Who::Mob(id)) = p.owner {
                     self.mob_pearl_teleport(p, id, hit);
                 }

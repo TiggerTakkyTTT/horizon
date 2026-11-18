@@ -1512,22 +1512,29 @@ impl Game<'_> {
         if self.lan.is_none() {
             return;
         }
-        for t in std::mem::take(&mut self.level_teleports) {
+        let mut pending = std::mem::take(&mut self.level_teleports).into_iter();
+        while let Some(t) = pending.next() {
             let restore = self.dim;
             let source = t.source.unwrap_or(restore);
             if self.dim != source && let Err(e) = self.enter_level(source) {
                 log::error!("could not open {}: {e}", source.id());
                 if !self.restore_level_after_teleport(restore) {
+                    self.level_teleports.push(t);
+                    self.level_teleports.extend(pending);
                     break;
                 }
                 continue;
             }
             let Some(host) = self.lan.as_mut() else {
-                self.restore_level_after_teleport(restore);
+                self.level_teleports.push(t);
+                self.level_teleports.extend(pending);
+                let _ = self.restore_level_after_teleport(restore);
                 return;
             };
             let Some(i) = host.hub.guests.iter().position(|g| g.conn == t.conn) else {
                 if !self.restore_level_after_teleport(restore) {
+                    self.level_teleports.push(t);
+                    self.level_teleports.extend(pending);
                     break;
                 }
                 continue;
@@ -1538,12 +1545,16 @@ impl Game<'_> {
             if let Err(e) = self.enter_level(t.dim) {
                 log::error!("could not open {}: {e}", t.dim.id());
                 if !self.restore_level_after_teleport(restore) {
+                    self.level_teleports.push(t);
+                    self.level_teleports.extend(pending);
                     break;
                 }
                 continue;
             }
             let Some(host) = self.lan.as_mut() else {
-                self.restore_level_after_teleport(restore);
+                self.level_teleports.push(t);
+                self.level_teleports.extend(pending);
+                let _ = self.restore_level_after_teleport(restore);
                 return;
             };
             let (uuid, name) = (host.hub.guests[i].uuid, host.hub.guests[i].name.clone());
@@ -1611,6 +1622,9 @@ impl Game<'_> {
                 left: Some(source),
             });
             if !self.restore_level_after_teleport(restore) {
+                // `t` has completed, including its damage and destination
+                // bookkeeping. Only requests not reached yet may be retried.
+                self.level_teleports.extend(pending);
                 break;
             }
         }
