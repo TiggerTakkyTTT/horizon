@@ -5277,10 +5277,7 @@ impl Game<'_> {
         {
             self.spawn_mob_raw("minecraft:endermite", from, false);
         }
-        if !self.restore_level_after_pearl(owner_dim, restore) {
-            return false;
-        }
-        true
+        self.restore_level_after_pearl(owner_dim, restore)
     }
 
     /// Restore the level temporarily left for a pearl-side effect.
