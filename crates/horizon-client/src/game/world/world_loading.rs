@@ -400,6 +400,7 @@ fn upgrade_world(
     );
     let stop = std::sync::atomic::AtomicBool::new(false);
     let result = std::thread::scope(|scope| {
+        let _stop_on_panic = crate::game::dedicated::StopUpgradeWatcher(&stop);
         let watcher = horizon_guest_stack::builder()
             .spawn_scoped(scope, || {
             let mut last_progress = 0.0;
