@@ -307,6 +307,9 @@ impl Game<'_> {
                 CursorGrabMode::Confined => CursorGrabMode::Locked,
                 CursorGrabMode::None => return,
             };
+            // winit skips an identical grab request on X11. Clear its recorded mode first so a
+            // compositor-released grab is actually requested again.
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
             self.capture_mode = if window.set_cursor_grab(mode).is_ok() {
                 Some(mode)
             } else if window.set_cursor_grab(other).is_ok() {

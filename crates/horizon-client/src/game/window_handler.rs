@@ -37,10 +37,14 @@ fn locks_out(origin: input_trace::InputOrigin, scripted: bool, event: &WindowEve
 /// Linux can drop a confined pointer grab while a touchpad is moving and a
 /// movement key is held. Reassert it on the next key press as well as on the
 /// pointer events that already did so.
+fn should_reassert_key(state: ElementState, repeat: bool) -> bool {
+    state == ElementState::Pressed && !repeat
+}
+
 pub(super) fn should_reassert_pointer_capture(event: &WindowEvent) -> bool {
     match event {
         WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => true,
-        WindowEvent::KeyboardInput { event, .. } => event.state == ElementState::Pressed,
+        WindowEvent::KeyboardInput { event, .. } => should_reassert_key(event.state, event.repeat),
         _ => false,
     }
 }
@@ -447,6 +451,13 @@ mod tests {
         assert!(!should_reassert_pointer_capture(&events[2]));
         assert!(!should_reassert_pointer_capture(&events[3]));
         assert!(!should_reassert_pointer_capture(&events[4]));
+    }
+
+    #[test]
+    fn pointer_capture_ignores_key_repeats() {
+        assert!(should_reassert_key(ElementState::Pressed, false));
+        assert!(!should_reassert_key(ElementState::Pressed, true));
+        assert!(!should_reassert_key(ElementState::Released, false));
     }
 
     #[test]
