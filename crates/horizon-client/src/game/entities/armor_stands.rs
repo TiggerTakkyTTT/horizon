@@ -1047,10 +1047,16 @@ impl Game<'_> {
             }
             if vehicle_is_falling {
                 // A summoned armor stand can be a disposable passenger of a
-                // falling block. Its Health:0 is kept alive until the vehicle
-                // lands and dismounts it; vanilla ticks it as a passenger,
-                // rather than removing it before the contraption lands.
+                // falling block. Vanilla still ticks its death animation as a
+                // passenger, then removes it after 20 ticks.
                 let a = &mut self.armor_stands[i];
+                if a.health <= 0.0 {
+                    a.death_time = a.death_time.saturating_add(1);
+                    if a.death_time >= 20 {
+                        dead.push((i, "minecraft:generic"));
+                        continue;
+                    }
+                }
                 a.previous = a.position;
                 a.previous_yaw = a.yaw;
                 a.first_tick = false;

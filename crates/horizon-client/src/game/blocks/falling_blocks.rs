@@ -2,13 +2,19 @@
 //! (`fall_step`) and the item entity it leaves as a drop (`drop_falling_block`, `Entity.spawnAtLocation`).
 use super::*;
 
+const FALLING_BLOCK_PASSENGER_OFFSET: f64 = 0.98;
+
 impl Game<'_> {
-    /// A passenger's position on a loaded falling-block vehicle. Falling
-    /// blocks have no extra riding offset; armor stands expose their normal
+    /// A passenger's position on a loaded vehicle. Falling blocks use the
+    /// fallback `AT_HEIGHT` attachment, while armor stands expose their normal
     /// entity height as the point for their own passengers.
     pub(super) fn falling_passenger_position(&self, vehicle: u32) -> Option<(Vec3, Vec3)> {
         if let Some(falling) = self.falling.iter().find(|f| f.id == vehicle) {
-            return Some((falling.position, falling.previous));
+            let offset = Vec3::new(0.0, FALLING_BLOCK_PASSENGER_OFFSET, 0.0);
+            return Some((
+                falling.position.add_vector(offset),
+                falling.previous.add_vector(offset),
+            ));
         }
         let stand = self.armor_stands.iter().find(|a| a.id == vehicle)?;
         let height = if stand.marker {
@@ -29,19 +35,34 @@ impl Game<'_> {
     /// The stand keeps its old position for interpolation, matching the
     /// passenger tick that follows a vehicle's move in vanilla.
     fn sync_falling_passengers_at(&mut self, vehicle: u32, position: Vec3, previous: Vec3) {
+        if !self
+            .armor_stands
+            .iter()
+            .any(|stand| stand.vehicle == Some(vehicle))
+        {
+            return;
+        }
+        let offset = Vec3::new(0.0, FALLING_BLOCK_PASSENGER_OFFSET, 0.0);
         for stand in self
             .armor_stands
             .iter_mut()
             .filter(|stand| stand.vehicle == Some(vehicle))
         {
-            stand.previous = previous;
-            stand.position = position;
+            stand.previous = previous.add_vector(offset);
+            stand.position = position.add_vector(offset);
             stand.velocity = Vec3::ZERO;
             stand.on_ground = false;
         }
     }
 
     fn sync_falling_passengers(&mut self, vehicle: u32) {
+        if !self
+            .armor_stands
+            .iter()
+            .any(|stand| stand.vehicle == Some(vehicle))
+        {
+            return;
+        }
         let Some(falling) = self.falling.iter().find(|f| f.id == vehicle) else {
             return;
         };
