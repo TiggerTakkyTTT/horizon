@@ -438,6 +438,7 @@ pub(super) fn start_game<'a>(
                     .and_then(|value| value.to_str()?.parse().ok())
                 {
                     game.settings.simulation_distance = distance;
+                    game.command_harness_scheduled_tick_range = true;
                 }
                 // Headless, but with the same server and memory connection as play.
                 game.open_integrated(&folder, None, Some(seed), creative, None)?;

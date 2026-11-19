@@ -992,7 +992,15 @@ impl LevelAccess for GameLevel<'_> {
     /// `ServerLevel.isPositionTickingWithEntitiesLoaded`: block ticking, a
     /// ticking chunk, and its entities loaded.
     fn is_ticking_chunk(&self, chunk: horizon_core::position::ChunkPos) -> bool {
-        self.tickets.block_ticking(chunk.x, chunk.z)
+        let in_range = if self.command_harness_scheduled_tick_range {
+            // The command oracle holds only a 5x5 ticking area. The normal server ticket model
+            // gives scheduled ticks the extra block-ticking ring, so use its entity-ticking
+            // range only for this explicitly scoped parity run.
+            self.tickets.entity_ticking(chunk.x, chunk.z)
+        } else {
+            self.tickets.block_ticking(chunk.x, chunk.z)
+        };
+        in_range
             && ticking_chunk(self.world, chunk.x, chunk.z)
             && !self.world.entities_pending.contains(&(chunk.x, chunk.z))
     }
