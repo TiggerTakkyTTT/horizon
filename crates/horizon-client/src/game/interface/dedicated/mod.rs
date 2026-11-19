@@ -62,11 +62,15 @@ struct StartupControl {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// The supervisor polls every 250 ms. Keep the temporary endpoint alive long enough for a final
+/// failed-upgrade event to be observed before startup returns without entering the tick loop.
+const STARTUP_FAILURE_EVENT_DRAIN: Duration = Duration::from_millis(350);
+
 impl StartupControl {
     fn start(server: control::Server) -> std::io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
-        let (returned, return_server) = mpsc::sync_channel(1);
+        let (return_server, returned) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
             .name("dedicated-startup-control".into())
             .spawn(move || {
@@ -95,7 +99,10 @@ impl StartupControl {
         })
     }
 
-    fn finish(mut self) -> Option<control::Server> {
+    fn finish(mut self, drain_failure_event: bool) -> Option<control::Server> {
+        if drain_failure_event {
+            std::thread::sleep(STARTUP_FAILURE_EVENT_DRAIN);
+        }
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -115,7 +122,13 @@ impl Drop for StartupControl {
 }
 
 /// Ensures the progress watcher stops if the world fixer panics before the normal join path.
-pub(in crate::game) struct StopUpgradeWatcher<'a>(&'a AtomicBool);
+pub(in crate::game) struct StopUpgradeWatcher<'a>(pub(in crate::game) &'a AtomicBool);
+
+impl<'a> StopUpgradeWatcher<'a> {
+    pub(in crate::game) fn new(stop: &'a AtomicBool) -> Self {
+        Self(stop)
+    }
+}
 
 impl Drop for StopUpgradeWatcher<'_> {
     fn drop(&mut self) {
@@ -1223,7 +1236,7 @@ impl Game<'_> {
             Arc::new(crate::game::api_values::game_rule_registry()),
         )?);
         if let Some(startup) = startup_control.take() {
-            self.control = startup.finish();
+            self.control = startup.finish(prepared_result.is_err());
         }
         let prepared = prepared_result?;
         *startup_began = true;
