@@ -434,7 +434,11 @@ pub(super) fn start_game<'a>(
                 // for only a 5x5 area. Keep the native harness at that same radius: the
                 // player's normal simulation distance would tick unrelated generated
                 // chunks and let their scheduled ticks consume the level random.
-                game.settings.simulation_distance = 2;
+                if let Some(distance) = std::env::var_os("HORIZON_COMMAND_SIMULATION_DISTANCE")
+                    .and_then(|value| value.to_str()?.parse().ok())
+                {
+                    game.settings.simulation_distance = distance;
+                }
                 // Headless, but with the same server and memory connection as play.
                 game.open_integrated(&folder, None, Some(seed), creative, None)?;
             } else {
