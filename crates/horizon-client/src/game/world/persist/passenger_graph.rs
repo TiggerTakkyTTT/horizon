@@ -225,7 +225,7 @@ impl Game<'_> {
         if let Some(m) = self.mob_object_mut(vehicle) {
             m.extra.rider.get_or_insert(id);
         }
-        if matches!(self.level_entity(vehicle as i32), Some(Target::Falling(_) | Target::Stand(_)))
+        if self.passenger_present(vehicle)
             && matches!(self.level_entity(id as i32), Some(Target::Falling(_)))
         {
             self.persist.falling_vehicles.insert(id, vehicle);

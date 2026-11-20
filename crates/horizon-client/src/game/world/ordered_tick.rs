@@ -215,6 +215,7 @@ impl Game<'_> {
         // at or above `born`, so the set cannot grow, only lose the removed.
         let (done, born, announced) =
             (self.ordered.done, self.ordered.born, self.ordered.announced);
+        let falling_stand_riders = self.falling_passenger_stand_index();
         let wanted = |j: JoinSeq| done.is_none_or(|d| j > d) && j < cut && j < born;
         let mut pending = std::mem::take(&mut self.ordered.pending_buf);
         pending.clear();
@@ -289,7 +290,11 @@ impl Game<'_> {
                                 )
                             })
                             .near(area.inflate(Vec3::new(1.0, 1.0, 1.0)), &mut nearby);
-                        if let Err(e) = self.tick_one_falling(i, &nearby) {
+                        if let Err(e) = self.tick_one_falling_with_stand_index(
+                            i,
+                            &nearby,
+                            &falling_stand_riders,
+                        ) {
                             first_error.get_or_insert(e);
                         }
                     } else {
