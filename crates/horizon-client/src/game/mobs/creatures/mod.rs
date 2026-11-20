@@ -5259,15 +5259,9 @@ impl Game<'_> {
         });
     }
 
-    /// `ThrownEnderpearl.onHit`: the five-percent endermite roll and spawn use
-    /// the pearl owner's source level, even when the pearl landed elsewhere.
-    /// Return false if the active level could not be restored for the caller.
-    fn spawn_pearl_endermite(&mut self, owner_dim: Dim, from: [f64; 3]) -> bool {
-        let restore = self.dim;
-        if owner_dim != restore && let Err(e) = self.enter_level(owner_dim) {
-            log::error!("could not open {} for an endermite spawn: {e}", owner_dim.id());
-            return false;
-        }
+    /// `ThrownEnderpearl.onHit`: roll and spawn in the pearl's landing level,
+    /// at the owner's source coordinates.
+    fn spawn_pearl_endermite(&mut self, from: [f64; 3]) {
         if self.world.random.next_float() < 0.05
             && self
                 .ui
@@ -5277,19 +5271,6 @@ impl Game<'_> {
         {
             self.spawn_mob_raw("minecraft:endermite", from, false);
         }
-        self.restore_level_after_pearl(owner_dim, restore)
-    }
-
-    /// Restore the level temporarily left for a pearl-side effect.
-    fn restore_level_after_pearl(&mut self, from: Dim, restore: Dim) -> bool {
-        if from == restore || self.dim == restore {
-            return true;
-        }
-        if let Err(e) = self.enter_level(restore) {
-            log::error!("could not restore {} after a pearl-side effect: {e}", restore.id());
-            return false;
-        }
-        true
     }
 
     /// A projectile's hit, landed in the attack of its owner.
@@ -5953,10 +5934,9 @@ impl Game<'_> {
                                     Some(g.entity_id),
                                     g.position,
                                     Dim::from_id(&g.dimension),
-                                    horizon_client::projectiles::owner_can_take_pearl(
-                                        g.health > 0.0 && !g.dead && !g.spectator(),
-                                        g.sleeping,
-                                    ),
+                                    // A cross-level ServerPlayer may use the pearl while
+                                    // sleeping; vanilla's portal path only requires alive.
+                                    g.health > 0.0 && !g.dead,
                                 )
                             })
                             .filter(|(_, _, _, owner_dim, _)| *owner_dim != self.dim)
@@ -6022,25 +6002,22 @@ impl Game<'_> {
                     }
                     if owner_dim != self.dim {
                         if can_take && !cancel {
-                            if !self.spawn_pearl_endermite(owner_dim, from) {
-                                return Ok(());
-                            }
-                            self.level_teleports.push(crate::game::server_travel::LevelTeleport {
-                                conn: conn.expect("cross-level player owner has a connection"),
-                                source: Some(owner_dim),
-                                dim: self.dim,
-                                at: [to.x, to.y, to.z],
-                                rotation: None,
-                                vehicle: None,
-                                damage: Some(("minecraft:ender_pearl", damage)),
-                            });
+                            self.spawn_pearl_endermite(from);
+                            self.level_teleports
+                                .push(crate::game::server_travel::LevelTeleport {
+                                    conn: conn.expect("cross-level player owner has a connection"),
+                                    source: Some(owner_dim),
+                                    dim: self.dim,
+                                    at: [to.x, to.y, to.z],
+                                    rotation: None,
+                                    vehicle: None,
+                                    damage: Some(("minecraft:ender_pearl", damage)),
+                                });
                         }
                         return Ok(());
                     }
                     if can_take && !cancel {
-                        if !self.spawn_pearl_endermite(owner_dim, from) {
-                            return Ok(());
-                        }
+                        self.spawn_pearl_endermite(from);
                         // ServerPlayer.teleport: removeVehicle before the placement.
                         section_steps::teleport_player(self, to);
                         self.hurt_player_by("minecraft:ender_pearl", damage);
@@ -10047,6 +10024,8 @@ mod tests {
             2,
         );
         guest.dimension = "minecraft:the_nether".into();
+        // Cross-level portal travel can wake a sleeping owner, matching vanilla.
+        guest.sleeping = true;
         guest.placed = true;
         guest.loaded = true;
         let uuid = horizon_client::lan::playerdata::uuid_ints(guest.uuid);
