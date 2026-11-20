@@ -192,11 +192,13 @@ impl Game<'_> {
         }
         f.fall_distance = 0.0;
     }
+    /// Test helper for ticking one block without running the ordered entity pass.
     /// FallingBlockEntity.tick: fall with 0.04 gravity and 0.98F drag, then land.
     /// One falling block's `tick`: places or drops its block in its own tick,
     /// so a block falling onto one that just landed lands on top of it. `i` is
     /// its place in the list; the caller has checked it is ticking.
     /// `entities` are the boxes that stop its move.
+    #[cfg(test)]
     pub(in crate::game) fn tick_one_falling(&mut self, i: usize, entities: &[Aabb]) -> Result<()> {
         let stand_riders = self.falling_passenger_stand_index();
         self.tick_one_falling_with_stand_index(i, entities, &stand_riders)
