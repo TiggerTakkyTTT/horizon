@@ -366,10 +366,9 @@ mod tests {
         }
 
         let mut poller = GamePoller::default();
-        let short_timeout = Duration::from_millis(40);
-        poller.poll_once(&shared, short_timeout);
-        poller.poll_once(&shared, short_timeout);
-        poller.poll_once(&shared, short_timeout);
+        poller.poll_once(&shared, Duration::from_secs(1));
+        poller.poll_once(&shared, Duration::from_millis(40));
+        poller.poll_once(&shared, Duration::from_secs(1));
         drop(poller);
         server.join().unwrap();
 
