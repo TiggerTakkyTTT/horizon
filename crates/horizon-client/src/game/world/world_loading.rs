@@ -382,7 +382,7 @@ impl WorldRequest {
 /// Opens an old dedicated-server world while reporting the management protocol's world-upgrade
 /// lifecycle. Integrated worlds keep their existing progress path because there is no supervisor
 /// management server to notify.
-fn upgrade_world(
+pub(in crate::game) fn upgrade_world(
     save_root: &std::path::Path,
     options: &Options,
     upgrade: &horizon_world::datafix::progress::UpgradeProgress,
@@ -403,23 +403,23 @@ fn upgrade_world(
         let _stop_on_panic = crate::game::dedicated::StopUpgradeWatcher::new(&stop);
         let watcher = horizon_guest_stack::builder()
             .spawn_scoped(scope, || {
-            let mut last_progress = 0.0;
-            let mut last_sent = std::time::Instant::now();
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                let progress = upgrade.total_file_fix_stats().progress();
-                let now = std::time::Instant::now();
-                if progress > last_progress
-                    && now.duration_since(last_sent) >= std::time::Duration::from_secs(1)
-                {
-                    crate::game::dedicated::record_world_upgrade(
-                        "world_upgrade_progress",
-                        serde_json::json!({ "progress": progress }),
-                    );
-                    last_progress = progress;
-                    last_sent = now;
+                let mut last_progress = 0.0;
+                let mut last_sent = std::time::Instant::now();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    let progress = upgrade.total_file_fix_stats().progress();
+                    let now = std::time::Instant::now();
+                    if progress > last_progress
+                        && now.duration_since(last_sent) >= std::time::Duration::from_secs(1)
+                    {
+                        crate::game::dedicated::record_world_upgrade(
+                            "world_upgrade_progress",
+                            serde_json::json!({ "progress": progress }),
+                        );
+                        last_progress = progress;
+                        last_sent = now;
+                    }
                 }
-            }
             })
             .expect("world upgrade progress watcher");
         let result = horizon_client::save::upgrade_older_world_with(save_root, upgrade);
@@ -430,7 +430,10 @@ fn upgrade_world(
 
     match result {
         Ok(()) => {
-            crate::game::dedicated::record_world_upgrade("world_upgrade_finished", serde_json::json!({}));
+            crate::game::dedicated::record_world_upgrade(
+                "world_upgrade_finished",
+                serde_json::json!({}),
+            );
             Ok(())
         }
         Err(error) => {

@@ -2782,8 +2782,8 @@ mod tests {
     }
 
     use super::{
-        capture_log, log, log_from, overload_warning, panic_message, parse_whitelist_bypass,
-        StartupControl,
+        Options, StartupControl, capture_log, log, log_from, overload_warning, panic_message,
+        parse_whitelist_bypass,
     };
     use std::{
         fs,
@@ -2792,10 +2792,10 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    /// A failed upgrade can be recorded after the supervisor's last startup poll. Keep the real
-    /// control endpoint alive through the startup shutdown handoff so that poll can fetch it.
+    /// Run a failed upgrade after the supervisor's last startup poll and keep the real control
+    /// endpoint alive through the shutdown handoff so the management poll can fetch its event.
     #[test]
-    fn late_world_upgrade_failure_is_served_during_startup_shutdown_handoff() {
+    fn upgrade_world_failure_is_served_during_startup_shutdown_handoff() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("control.sock");
         let server = super::control::Server::start(&path).unwrap();
@@ -2820,9 +2820,31 @@ mod tests {
                 .any(|event| event["type"] == "world_upgrade_failed")
         );
 
-        super::record_world_upgrade(
-            "world_upgrade_failed",
-            serde_json::json!({ "reason": "World upgrade failed" }),
+        let world = temp.path().join("old-world");
+        horizon_client::save::write_dat(
+            &world.join("level.dat"),
+            horizon_core::nbt::Tag::compound([(
+                "Data",
+                horizon_core::nbt::Tag::compound([(
+                    "DataVersion",
+                    horizon_core::nbt::Tag::Int(4899),
+                )]),
+            )]),
+        )
+        .unwrap();
+        let broken_region = world.join("dimensions/minecraft/overworld/region/broken.mca");
+        fs::create_dir_all(broken_region.parent().unwrap()).unwrap();
+        fs::write(&broken_region, b"x").unwrap();
+
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.execution_role = execution_role::ExecutionRole::DedicatedServer;
+        assert!(
+            crate::game::world_loading::upgrade_world(
+                &world,
+                &options,
+                &horizon_world::datafix::progress::UpgradeProgress::new(),
+            )
+            .is_err()
         );
         let finishing = std::thread::spawn(move || startup.finish(true));
 
@@ -2843,7 +2865,10 @@ mod tests {
         );
 
         let returned = finishing.join().unwrap();
-        assert!(returned.is_some(), "startup control server was not returned");
+        assert!(
+            returned.is_some(),
+            "startup control server was not returned"
+        );
         drop(reader);
         drop(client);
         drop(returned);
