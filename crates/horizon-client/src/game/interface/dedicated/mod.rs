@@ -2783,6 +2783,7 @@ mod tests {
 
     use super::{
         capture_log, log, log_from, overload_warning, panic_message, parse_whitelist_bypass,
+        StartupControl,
     };
     use std::{
         fs,
@@ -2790,6 +2791,63 @@ mod tests {
         process::{Command, Stdio},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    /// A failed upgrade can be recorded after the supervisor's last startup poll. Keep the real
+    /// control endpoint alive through the startup shutdown handoff so that poll can fetch it.
+    #[test]
+    fn late_world_upgrade_failure_is_served_during_startup_shutdown_handoff() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("control.sock");
+        let server = super::control::Server::start(&path).unwrap();
+        let startup = StartupControl::start(server).unwrap();
+        let mut client = horizon_client::control::connect(&path).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+
+        let cursor = super::events::since(u64::MAX)["next"].as_u64().unwrap();
+        let request = format!("server-events {cursor}");
+        writeln!(client, "{request}").unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let before_failure: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert!(
+            !before_failure["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["type"] == "world_upgrade_failed")
+        );
+
+        super::record_world_upgrade(
+            "world_upgrade_failed",
+            serde_json::json!({ "reason": "World upgrade failed" }),
+        );
+        let finishing = std::thread::spawn(move || startup.finish(true));
+
+        line.clear();
+        writeln!(client, "{request}").unwrap();
+        reader.read_line(&mut line).unwrap();
+        let during_shutdown: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert!(
+            during_shutdown["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event["type"] == "world_upgrade_failed"
+                        && event["reason"] == "World upgrade failed"
+                }),
+            "late failure event missing from {during_shutdown}"
+        );
+
+        let returned = finishing.join().unwrap();
+        assert!(returned.is_some(), "startup control server was not returned");
+        drop(reader);
+        drop(client);
+        drop(returned);
+    }
 
     /// A console line runs in the overworld even after a server tick left the nether in place.
     #[test]
