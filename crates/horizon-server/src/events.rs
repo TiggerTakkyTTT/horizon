@@ -303,9 +303,17 @@ mod tests {
 
     #[test]
     fn reconnect_after_control_timeout_resumes_the_event_cursor() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = std::env::temp_dir().join(format!(
+            "horizon-server-events-reconnect-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp).unwrap();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let path = horizon_server_launch::control_path(temp.path());
+        let path = horizon_server_launch::control_path(&temp);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -350,7 +358,7 @@ mod tests {
             write_events(&mut writer, &pending).unwrap();
         });
 
-        let shared = Shared::with_install(temp.path(), None);
+        let shared = Shared::with_install(&temp, None);
         {
             let mut state = shared.state.lock().unwrap();
             state.phase = Phase::Starting;
@@ -380,6 +388,7 @@ mod tests {
                 "world_upgrade_finished",
             ]
         );
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
