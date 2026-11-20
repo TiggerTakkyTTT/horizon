@@ -2837,7 +2837,7 @@ mod tests {
         fs::write(&broken_region, b"x").unwrap();
 
         let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
-        options.execution_role = execution_role::ExecutionRole::DedicatedServer;
+        options.execution_role = crate::game::execution_role::ExecutionRole::DedicatedServer;
         assert!(
             crate::game::world_loading::upgrade_world(
                 &world,
