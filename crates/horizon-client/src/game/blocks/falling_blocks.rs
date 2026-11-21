@@ -198,7 +198,6 @@ impl Game<'_> {
     /// so a block falling onto one that just landed lands on top of it. `i` is
     /// its place in the list; the caller has checked it is ticking.
     /// `entities` are the boxes that stop its move.
-    #[cfg(test)]
     pub(in crate::game) fn tick_one_falling(&mut self, i: usize, entities: &[Aabb]) -> Result<()> {
         let stand_riders = self.falling_passenger_stand_index();
         self.tick_one_falling_with_stand_index(i, entities, &stand_riders)

@@ -417,7 +417,7 @@ impl Game<'_> {
         own_seat: Option<Vec3>,
         index: &HashMap<u32, usize>,
     ) -> Option<glam::DVec3> {
-        self.passenger_riding_position_inner(vehicle, me, own_seat, index, &mut Vec::new(), true)
+        self.passenger_riding_position_inner(vehicle, me, own_seat, index, &mut Vec::new())
     }
 
     /// Resolve a generic seat without calling back into the falling passenger
@@ -426,7 +426,7 @@ impl Game<'_> {
         &self,
         vehicle: u32,
     ) -> Option<glam::DVec3> {
-        self.passenger_riding_position_inner(
+        self.passenger_riding_position_inner_with_falling(
             vehicle,
             None,
             None,
@@ -437,6 +437,17 @@ impl Game<'_> {
     }
 
     fn passenger_riding_position_inner(
+        &self,
+        vehicle: u32,
+        me: Option<u32>,
+        own_seat: Option<Vec3>,
+        index: &HashMap<u32, usize>,
+        path: &mut Vec<u32>,
+    ) -> Option<glam::DVec3> {
+        self.passenger_riding_position_inner_with_falling(vehicle, me, own_seat, index, path, true)
+    }
+
+    fn passenger_riding_position_inner_with_falling(
         &self,
         vehicle: u32,
         me: Option<u32>,
@@ -463,28 +474,26 @@ impl Game<'_> {
         }
         if let Some(d) = self.text_displays.get(&(vehicle as i32)) {
             return if let Some(parent) = d.vehicle {
-                self.passenger_riding_position_inner(
-                    parent,
-                    me,
-                    own_seat,
-                    index,
-                    path,
-                    resolve_falling,
-                )
+                if resolve_falling {
+                    self.passenger_riding_position_inner(parent, me, own_seat, index, path)
+                } else {
+                    self.passenger_riding_position_inner_with_falling(
+                        parent, me, own_seat, index, path, false,
+                    )
+                }
             } else {
                 Some(d.position())
             };
         }
         if let Some(i) = self.interactions.get(&(vehicle as i32)) {
             if let Some(parent) = i.vehicle {
-                return self.passenger_riding_position_inner(
-                    parent,
-                    me,
-                    own_seat,
-                    index,
-                    path,
-                    resolve_falling,
-                );
+                return if resolve_falling {
+                    self.passenger_riding_position_inner(parent, me, own_seat, index, path)
+                } else {
+                    self.passenger_riding_position_inner_with_falling(
+                        parent, me, own_seat, index, path, false,
+                    )
+                };
             }
             let at = i.position;
             return Some(glam::DVec3::new(at.x, at.y, at.z));
@@ -511,14 +520,13 @@ impl Game<'_> {
                 f64::from(1.975_f32)
             };
             let at = if let Some(parent) = a.vehicle {
-                self.passenger_riding_position_inner(
-                    parent,
-                    me,
-                    own_seat,
-                    index,
-                    path,
-                    resolve_falling,
-                )?
+                if resolve_falling {
+                    self.passenger_riding_position_inner(parent, me, own_seat, index, path)
+                } else {
+                    self.passenger_riding_position_inner_with_falling(
+                        parent, me, own_seat, index, path, false,
+                    )
+                }?
             } else {
                 glam::DVec3::new(a.position.x, a.position.y, a.position.z)
             };
@@ -539,14 +547,13 @@ impl Game<'_> {
         let remote = self.remote.as_ref()?;
         let (kind, position) = remote.tracked(vehicle as i32)?;
         let position = if let Some(&parent) = remote.passenger_vehicles.get(&vehicle) {
-            let at = self.passenger_riding_position_inner(
-                parent,
-                me,
-                own_seat,
-                index,
-                path,
-                resolve_falling,
-            )?;
+            let at = if resolve_falling {
+                self.passenger_riding_position_inner(parent, me, own_seat, index, path)?
+            } else {
+                self.passenger_riding_position_inner_with_falling(
+                    parent, me, own_seat, index, path, false,
+                )?
+            };
             [at.x, at.y, at.z]
         } else {
             position
