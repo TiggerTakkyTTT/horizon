@@ -9,7 +9,7 @@
 //! console on standard input.
 use super::{Game, Options, lan::LanSettings, world_loading::WorldRequest};
 use horizon_client::{
-    Result,
+    Result, control,
     lan::{
         LoginGate, NetConfig, NetLog, OnlineMode, hub::HubConfig, viewed_levels::areas as viewed,
     },
@@ -51,6 +51,75 @@ mod transfer;
 /// Records one of the management protocol's world-upgrade events for the supervisor to forward.
 pub(in crate::game) fn record_world_upgrade(kind: &str, fields: serde_json::Value) {
     events::record_server(kind, fields);
+}
+
+/// Serves event polls while the dedicated server prepares its first world. The normal control loop
+/// cannot run until the first tick, but the supervisor polls during startup.
+struct StartupControl {
+    stop: Arc<AtomicBool>,
+    returned: mpsc::Receiver<control::Server>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The supervisor polls every 250 ms. Leave time for one final poll when startup exits before ticking.
+const STARTUP_FAILURE_EVENT_DRAIN: Duration = Duration::from_millis(350);
+
+impl StartupControl {
+    fn start(server: control::Server) -> std::io::Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let (return_server, returned) = mpsc::sync_channel(1);
+        let thread = std::thread::Builder::new()
+            .name("dedicated-startup-control".into())
+            .spawn(move || {
+                while !worker_stop.load(Ordering::Relaxed) {
+                    let Some(request) = server.try_recv() else {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    };
+                    let reply = match request.line.trim().split_once(' ') {
+                        Some(("server-events", since)) => {
+                            events::since(since.trim().parse().unwrap_or(0)).to_string()
+                        }
+                        _ => serde_json::json!({
+                            "error": "the dedicated server is still starting"
+                        })
+                        .to_string(),
+                    };
+                    let _ = request.reply.send(reply);
+                }
+                let _ = return_server.send(server);
+            })?;
+        Ok(Self {
+            stop,
+            returned,
+            thread: Some(thread),
+        })
+    }
+
+    fn finish(mut self, drain_failure_event: bool) -> Option<control::Server> {
+        if drain_failure_event {
+            std::thread::sleep(STARTUP_FAILURE_EVENT_DRAIN);
+        }
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        self.returned.recv().ok()
+    }
+}
+
+impl Drop for StartupControl {
+    fn drop(&mut self) {
+        if self.thread.is_some() {
+            std::thread::sleep(STARTUP_FAILURE_EVENT_DRAIN);
+        }
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+            let _ = self.returned.recv();
+        }
+    }
 }
 
 /// What the tick loop tells `ServerWatchdog`: when the tick in progress was
@@ -1143,6 +1212,7 @@ impl Game<'_> {
         // Read before the levels are made: each one's block ticks take it (`Levels::new_ticks`).
         self.levels
             .set_max_chained_neighbor_updates(props.max_chained_neighbor_updates);
+        let startup_control = self.control.take().map(StartupControl::start).transpose()?;
         let prepared = self.prepare_world_and_rules(WorldRequest::new(
             &folder,
             Some(&level_name),
@@ -1453,6 +1523,11 @@ impl Game<'_> {
                     sampler: Default::default(),
                 },
             );
+        }
+        // Keep answering server-events until every startup stage (including the listen attempt)
+        // is complete; the first tick can then take over the same endpoint.
+        if let Some(startup) = startup_control {
+            self.control = startup.finish(false);
         }
         let mut next = Instant::now();
         // The panic that ended the tick loop, when one did.
