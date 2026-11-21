@@ -146,5 +146,35 @@ fn falling_block_passenger_stays_attached_to_any_loaded_vehicle() {
             .expect("the mounted child should remain present");
         assert_eq!(child.position, expected);
         assert_eq!(child.age, age + 1, "rideTick still advances the block age");
+        assert_eq!(
+            game.persist.falling_vehicles.get(&child_id),
+            Some(&vehicle_id),
+            "the passenger should remain linked to its TNT vehicle"
+        );
+
+        let moved_vehicle = Vec3::new(8.5, 210.0, 8.5);
+        game.tnts
+            .iter_mut()
+            .find(|tnt| tnt.id == vehicle_id)
+            .expect("the TNT vehicle should remain present")
+            .position = moved_vehicle;
+        let target = game.level_entity(vehicle_id as i32).unwrap();
+        let at = game.target_position(target).unwrap();
+        let bounds = game.local_passenger_vehicle_bounds(vehicle_id).unwrap();
+        let moved_expected = Vec3::new(at[0], bounds.max_position().y, at[2]);
+
+        game.tick_one_falling(child_index, &[]).unwrap();
+        let child = game
+            .falling
+            .iter()
+            .find(|falling| falling.id == child_id)
+            .expect("the mounted child should stay present after its vehicle moves");
+        assert_eq!(child.position, moved_expected);
+        assert_eq!(child.age, age + 2, "each mounted tick advances the block age");
+        assert_eq!(
+            game.persist.falling_vehicles.get(&child_id),
+            Some(&vehicle_id),
+            "the moving vehicle should keep its passenger link"
+        );
     });
 }
