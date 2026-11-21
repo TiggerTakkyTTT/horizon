@@ -295,10 +295,15 @@ turn the switch off.
    {"id": "done", "kind": "button", "label": "Done", "bounds": [...], "enabled": true}]}
 ```
 
-- **Ids are stable and readable.** An id is the label up to its `:`, as a slug (`FOV: 70` is
-  `fov`, `AI Agent...` is `ai-agent`). A repeated slug gets `-2`, `-3`; unlabelled elements are
-  `<kind>-<n>`. A slider's id doesn't change with its value. Slots are `slot-<ID>` with their
-  stack.
+- **Ids are slugs of the drawn label, so they follow the client's language.** An id is the label
+  up to its `:`, as a slug (`FOV: 70` is `fov`, `AI Agent...` is `ai-agent`), and the label is the
+  translated text the screen drew: the ids in this page and in
+  [native-client.md](native-client.md) are the English ones. On a Russian client the title screen
+  has `одиночная-игра`, not `singleplayer`, and `настройки`, not `options`. A script that clicks a
+  literal id either pins the language first (`options-set lang en_us` on a running game, or
+  `lang:en_us` in the game folder's `options.txt` before launch: `--game-dir`, default the
+  working directory, or `--player-dir` when set) or reads `ui` and uses the ids it returns. A repeated slug gets `-2`, `-3`; unlabelled elements are `<kind>-<n>`. A slider's id
+  doesn't change with its value. Slots are `slot-<ID>` with their stack.
 - **Kinds:** `button`, `slider` (`value` 0..1), `field`, `row` (a world, server, pack or
   language), `tab` (`selected`), `slot`.
 - **Actions:**
@@ -438,7 +443,7 @@ of the frame ([#8750](https://github.com/horizon-rust/horizon/issues/8750)).
   using an item, riding, running out of air.
 - A shader pack's own buffers, kept from frame to frame, take `horizon-ctl screenshot-sequence
   FRAMES STEP_MS PATH`: the pack starts over (its buffers, images, shadow maps, smoothed values and
-  custom uniforms, or a Horizon pack's `history` and eased values) and draws FRAMES frames on a set
+  custom uniforms, or a Horizon pack's kept resources and eased values) and draws FRAMES frames on a set
   clock, frame n at n frames and (n - 1) × STEP_MS milliseconds (0 since the frame before on frame
   1, STEP_MS after; a decimal, `16.666667` for 60 fps). The last is written as `screenshot PATH`
   writes it (with its `-hdr.png` under HDR output), and the reply, once it is, names the pack and

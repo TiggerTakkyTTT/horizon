@@ -5,12 +5,9 @@
 //! icon, name, line, summary, what it may do, downloads, and Install in or Remove from the
 //! instance).
 //!
-//! The mockup's tabs are its sources (Horizon, Modrinth, CurseForge soon); the launcher's page
-//! is by kind (mods, modpacks, resource packs, shader packs, data packs), each with its sources,
-//! so the tabs are the kinds and the sources are a switch under the search: Horizon's registry
-//! or Modrinth, CurseForge beside them as coming soon, on the kinds both serve (`switches`):
-//! shader packs are Horizon's registry's only, and a Java
-//! instance's files always Modrinth's. Modrinth's Java mods are offered to a Horizon instance
+//! The page is by kind (mods, modpacks, resource packs, shader packs, data packs); each kind
+//! searches its own source (`source_for`), with no source switch. A Java
+//! instance's files are always Modrinth's. Modrinth's Java mods are offered to a Horizon instance
 //! too, each marked Works, Partly or Doesn't run in Horizon. Not in the mockup, kept in its
 //! patterns: Show everything, the filters, which instance or world installs go to (under the
 //! search); the
@@ -155,14 +152,11 @@ impl Launcher {
                         ))
                         .child(ui::text(13., FontWeight::NORMAL, 0.7).child(tr("Show everything")))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.mods.everything = !this.mods.everything;
+                            this.mods.toggle_everything();
                             this.mods_search(0);
                             cx.notify();
                         })),
                 )
-            })
-            .when(switches(self.mods.kind) && !java, |d| {
-                d.child(self.glass_source_switch(cx))
             })
             .child(self.mods_filters(cx))
             .children(self.mods_target_line(cx))
@@ -220,55 +214,6 @@ impl Launcher {
                 .gap(px(10.))
                 .mt(px(10.))
                 .children(more),
-        )
-    }
-
-    /// The source switch (`switches`): Horizon's registry or Modrinth as small tabs, CurseForge
-    /// after them as coming soon, shown, inert, never searched, as in the mockup.
-    fn glass_source_switch(&mut self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        let current = self.mods.source;
-        let active = SOURCES.iter().position(|(s, _)| *s == current).unwrap_or(0);
-        let items: Vec<_> = SOURCES
-            .into_iter()
-            .map(|(source, label)| {
-                small_tab(format!("mods-source-{label}").into(), source == current, &t)
-                    .child(tr(label).to_string())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        if this.mods.source != source {
-                            this.mods.source = source;
-                            this.mods.browse.filters = Default::default();
-                            this.mods.browse.open = None;
-                            this.mods.picked = None;
-                            this.mods_search(0);
-                        }
-                        cx.notify();
-                    }))
-            })
-            .collect();
-        let row = div()
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .child(ui::pill_strip(
-                "mods-sources",
-                active,
-                32.,
-                0.,
-                div().flex().items_center().gap(px(4.)),
-                items,
-            ));
-        row.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .h(px(32.))
-                .px(px(12.))
-                .text_size(px(13.))
-                .text_color(white(0.35))
-                .child("CurseForge")
-                .child(tr("soon").to_string()),
         )
     }
 
@@ -388,7 +333,7 @@ impl Launcher {
         let m = &self.mods;
         if let Some(e) = &m.error {
             // A failed search stays as an amber card: what happened in plain words, Try again,
-            // Modrinth while Horizon's own list is down, and the error's own words on request.
+            // and the error's own words on request.
             let details = m.error_details;
             let horizon = m.source == SourceId::Horizon && m.java_for(m.kind).is_none();
             let what = if horizon {
@@ -404,24 +349,6 @@ impl Launcher {
                     },
                 )),
             );
-            if horizon {
-                actions = actions.child(
-                    button(
-                        "mods-to-modrinth",
-                        "Browse Modrinth instead",
-                        Kind::Ghost,
-                        &t,
-                    )
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.mods.source = SourceId::Modrinth;
-                        this.mods.browse.filters = Default::default();
-                        this.mods.browse.open = None;
-                        this.mods.picked = None;
-                        this.mods_search(0);
-                        cx.notify();
-                    })),
-                );
-            }
             actions = actions.child(
                 button(
                     "mods-error-details",
@@ -459,8 +386,12 @@ impl Launcher {
                         .child(actions),
                 );
         }
-        if m.results.is_empty() {
-            let line = if m.searching || !m.searched {
+        let shown = m.shown();
+        if shown.is_empty() {
+            let line = if !m.results.is_empty() {
+                tr("Nothing found that runs in Horizon. Show everything lists the rest.")
+                    .to_string()
+            } else if m.searching || !m.searched {
                 tr("Searching…").to_string()
             } else if let Some(target) = m.java_for(m.kind) {
                 trf(
@@ -480,10 +411,11 @@ impl Launcher {
                 tr("Nothing found that runs in Horizon. Show everything lists the rest.")
                     .to_string()
             };
-            return ui::text(14., FontWeight::NORMAL, 0.6)
+            let line = ui::text(14., FontWeight::NORMAL, 0.6)
                 .px(px(16.))
                 .py(px(24.))
                 .child(line);
+            return self.glass_mods_more(div().flex().flex_col().child(line), cx);
         }
         let picked = self.mods_picked().map(|p| p.id.clone());
         // Registry pages add up behind More: only the rows near the view are built (`cull`).
@@ -491,9 +423,9 @@ impl Launcher {
             self.mods.results_list.clone(),
             self.content_scroll.handle.clone(),
         );
-        let total = self.mods.results.len();
+        let total = shown.len();
         let row = |i: usize| {
-            let p = self.mods.results[i].clone();
+            let p = self.mods.results[shown[i]].clone();
             let icon = self.mods_icon(&p, 40.);
             let m = &self.mods;
             let installed = m.entry(&p).is_some();
@@ -621,11 +553,16 @@ impl Launcher {
                 cx.notify();
             }))
         };
-        let mut list =
-            div()
-                .flex()
-                .flex_col()
-                .child(rows.column(&scroll, total, 0., |_| false, row));
+        let list = div()
+            .flex()
+            .flex_col()
+            .child(rows.column(&scroll, total, 0., |_| false, row));
+        self.glass_mods_more(list, cx)
+    }
+
+    /// The list's More, under `list` while the source has more pages.
+    fn glass_mods_more(&self, mut list: Div, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
         if self.mods.more {
             let searching = self.mods.searching;
             let offset = self.mods.results.len();
@@ -648,12 +585,14 @@ impl Launcher {
     /// The picked result, else the first; when a search finds nothing, the card shown last stays
     /// (the mockup's detail keeps its mod).
     fn mods_picked(&mut self) -> Option<Project> {
+        let shown = self.mods.shown();
         let m = &mut self.mods;
+        let mut listed = shown.iter().map(|&i| &m.results[i]);
         let found = m
             .picked
             .as_ref()
-            .and_then(|id| m.results.iter().find(|p| &p.id == id))
-            .or(m.results.first())
+            .and_then(|id| listed.clone().find(|p| &p.id == id))
+            .or(listed.next())
             .cloned();
         match found {
             Some(p) => {

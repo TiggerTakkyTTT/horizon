@@ -395,7 +395,9 @@ far past the view distance, which helps players find the seed. A player's own LO
 shorter. Each player may have 8 tiles waiting and ask for 64 a second on average, and one background thread
 samples them for everyone in turn, behind the ticks, so far terrain never slows the server down; a tile past the
 distance or over a player's limits is refused, and a client that keeps breaking the limits is disconnected.
-Tiles are sampled again for each player who asks (there is no cache yet). Vanilla clients never hear of it.
+A tile is the same for every player in its level, so the server keeps the tiles it sampled in memory (up to
+32 MiB, about 4,000 tiles; the least recently asked for go first) and answers the next player who asks for one
+with it: players looking at the same land cost one sample. Vanilla clients never hear of it.
 
 `horizon-server report` records the running server for 60 seconds (`report 300` for five minutes, up to 600) into
 `reports/profile-<time>Z.hzperf`, a capture the performance tools read ([perf-platform.md](perf-platform.md)), and
@@ -444,6 +446,31 @@ other vanilla key). The values are checked as the server checks them, and nothin
 A running server takes the difficulty, the default game mode, the whitelist, the message of the day, the
 player limit and the backup settings at once; the rest applies at its next start, and `config set` says which. `--json` prints that as `saved`, `applied`
 and `restart`.
+
+**`/restart`** saves and stops the game as `/stop` does, and the server starts it again: from in game, the console,
+RCON and `horizon-server cmd restart`, for owners (the permission `/stop` needs). The command exists only on a
+server `horizon-server` runs, so vanilla's command tree is unchanged elsewhere; a game started by hand answers on its
+console that nothing would start it again, and does nothing. The game program is looked up again at every start, so a
+new engine put in place beforehand (`engine.path`, or the release `current` points at) runs after the restart. Put it
+there with `mv` or `install`, which swap the file: copying over the running program fails or corrupts it.
+Players are disconnected for now; [#16251](https://github.com/horizon-rust/horizon/issues/16251) is about holding them through it.
+
+### Behind the server's own proxy: `[proxy]`
+
+    [proxy]
+    enabled = true
+
+Off by default. With it on, `horizon-server` listens on `server.port` itself and runs the game on 127.0.0.1, on
+`game_port` (0: a free port), with Velocity forwarding and a secret it makes (`forwarding.secret`, kept in
+`.horizon/`; a `forwarding.secret` you wrote for a Velocity of your own stops the start). It logs each player in
+itself, with `online_mode` as set (the account check and the encryption), then logs into the game as that player
+and passes the packets along as they are. The game sees the player's real UUID, name, skin and address, and its own
+whitelist, bans and player limit apply as always. The server list is the game's own, or says "restarting" while the
+game is down. It is read when `horizon-server` starts, not when the game does.
+
+It is not a general proxy: one game, the one this server runs, and no routing (for several servers, see
+[#7484](https://github.com/horizon-rust/horizon/issues/7484)). Clients of an older release (`accept_older_clients`)
+can't join through it. The game's own port is private: a login that doesn't come from the proxy is refused.
 
 The server restarts the game by itself if it crashes: after 5 s, then waiting longer each time, up to 5
 minutes. It keeps the crash report and gives up after 5 crashes in 10 minutes, and `status` says why.
@@ -499,7 +526,7 @@ or keeps its settings, fix both in `server.toml`:
 ```toml
 [api]
 bind = "127.0.0.1:8131"      # or your tailnet address, 100.x.y.z:8131
-token = "a long random string only the bot knows"
+token = "b0t-0nly-2f9c41a7d8e35b60"   # 16 characters or more, no spaces
 ```
 
 The same rules as the panel's hold: a tailnet or loopback address, unless `allow_public = true` (the token is then

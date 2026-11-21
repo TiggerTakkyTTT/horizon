@@ -1,6 +1,6 @@
 //! The Mods page: its tabs are the kinds (mods, modpacks, resource packs, shader packs, data
-//! packs). Search Horizon's own registry for what was made for Horizon, or Modrinth (CurseForge:
-//! coming soon) for Java mods, modpacks, resource packs and data packs (a Java instance's files
+//! packs). Search Horizon's own registry for what was made for Horizon, or Modrinth for Java
+//! mods, modpacks, resource packs and data packs (a Java instance's files
 //! always come from Modrinth, for its version), see where each comes
 //! from and how well it runs (a Java mod's jar is checked first; a Horizon mod says whether it is
 //! signed and what it may do), install it with its checksum checked, turn Horizon mods on and
@@ -29,12 +29,6 @@ const KINDS: [(PackKind, &str, &str); 5] = [
 ];
 /// Java mods checked at once.
 const CHECKING: usize = 2;
-/// The sources to pick from on the tabs that have both ([`switches`]); CurseForge is shown
-/// beside them as coming soon.
-pub(super) const SOURCES: [(SourceId, &str); 2] = [
-    (SourceId::Horizon, "Horizon"),
-    (SourceId::Modrinth, "Modrinth"),
-];
 const PAGE: usize = 20;
 
 #[path = "glass_mods.rs"]
@@ -131,6 +125,9 @@ pub(super) struct Mods {
     /// the next build attempt, whatever the player chose.
     pub(super) unbuilt: Option<(String, Vec<String>)>,
     native_files: std::cell::RefCell<Option<(String, Vec<native_status::Installed>)>>,
+    /// Whether any tracked file asks for a native build, by the same key as `native_files`:
+    /// telling an old-format `.hmod` apart reads the archive, never on each draw.
+    tracked_native: std::cell::RefCell<Option<(String, bool)>>,
     /// Java mods' checks, by source and project.
     pub(super) checks: HashMap<(SourceId, String), Checking>,
     /// Horizon registry projects' trust and capabilities, by id ([`horizon::trust_and_capabilities`]).
@@ -226,6 +223,7 @@ impl Mods {
             route_open: None,
             unbuilt: None,
             native_files: Default::default(),
+            tracked_native: Default::default(),
             updates: HashMap::new(),
             confirm_remove: None,
             picked: None,
@@ -265,6 +263,17 @@ impl Mods {
             && p.support().installable()
     }
 
+    /// The results listed, by index into `results` (#18071).
+    pub(super) fn shown(&self) -> Vec<usize> {
+        shown(&self.results, self.everything, |p| self.support(p))
+    }
+
+    /// Flips Show everything. Its checks go too: `everything` picks which file a check reads.
+    pub(super) fn toggle_everything(&mut self) {
+        self.everything = !self.everything;
+        self.checks.clear();
+    }
+
     /// How well a result runs: a Java mod's from its check once it has one. In a Java
     /// instance, a result was searched for its version and loader: installing checks the file.
     pub(super) fn support(&self, p: &Project) -> Support {
@@ -283,6 +292,19 @@ impl Mods {
             _ => Support::Partial(tr("Checking its jar…").into()),
         }
     }
+}
+
+/// The indices of `results` to list: with Show everything off, what doesn't run in Horizon
+/// stays out. A Modrinth mod's verdict comes from its jar check after the search, so the search
+/// alone can't leave these out; `results` keeps every row, as paging counts on it.
+fn shown(
+    results: &[Project],
+    everything: bool,
+    support: impl Fn(&Project) -> Support,
+) -> Vec<usize> {
+    (0..results.len())
+        .filter(|&i| everything || support(&results[i]).installable())
+        .collect()
 }
 
 /// `51404735` → `51.4M`.
@@ -443,6 +465,8 @@ impl Launcher {
                         Err(e) => Checking::Failed(e),
                     };
                     m.checks.insert(key, state);
+                    // A row may leave the list (`shown`): measure them again (`cull`).
+                    m.results_list.reset();
                 }
                 Event::Loaded(l) => loaded.push(l),
                 Event::About(about) => {
@@ -602,7 +626,7 @@ impl Launcher {
             .collect();
         let tx = self.mods.tx.clone();
         std::thread::spawn(move || {
-            let lines = auto_update(&list, enabled);
+            let lines = auto_update(&list, enabled, &|_| {});
             if !lines.is_empty() {
                 let _ = tx.send(Event::AutoUpdated(lines));
             }
@@ -720,9 +744,15 @@ impl Launcher {
         }
         let tx = self.mods.tx.clone();
         let java = self.mods.java.clone();
+        let home = self.mods.home();
         std::thread::spawn(move || {
             let mut found = HashMap::new();
             for e in entries {
+                // A Horizon row whose file is missing offers Remove, not an update. (A Java
+                // instance's jar turned off is renamed: its recorded file isn't there.)
+                if java.is_none() && installed::file_missing(&home, &e) {
+                    continue;
+                }
                 let Some(source) = browser::source(e.source) else {
                     continue;
                 };
@@ -738,24 +768,30 @@ impl Launcher {
         });
     }
 
-    /// Updates every installed pack a newer version was found for, one after the other on a
-    /// thread, each checked as an install is. One failing doesn't stop the others.
-    pub(super) fn mods_update_all(&mut self) {
-        if self.mods.busy.is_some() || self.mods.updates.is_empty() {
-            return;
-        }
-        let mut todo: Vec<(SourceId, String, String)> = self
-            .mods
-            .installed
-            .iter()
+    /// What Update all updates and what its button counts: each installed pack a newer version
+    /// was found for, but not a Horizon mod whose file is gone now (its row offers Remove).
+    pub(super) fn mods_updatable(&self) -> Vec<(SourceId, String, String)> {
+        let home = self.mods.home();
+        let mut todo: Vec<(SourceId, String, String)> = (self.mods.installed.iter())
             .filter(|e| {
                 self.mods
                     .updates
                     .contains_key(&(e.source, e.project.clone()))
             })
+            .filter(|e| self.mods.java.is_some() || !installed::file_missing(&home, e))
             .map(|e| (e.source, e.project.clone(), e.title.clone()))
             .collect();
         todo.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+        todo
+    }
+
+    /// Updates every installed pack a newer version was found for, one after the other on a
+    /// thread, each checked as an install is. One failing doesn't stop the others.
+    pub(super) fn mods_update_all(&mut self) {
+        let todo = self.mods_updatable();
+        if self.mods.busy.is_some() || todo.is_empty() {
+            return;
+        }
         self.mods.message = None;
         self.mods.busy = Some(("all".into(), "Updating…".into(), 0.));
         self.mods.updates.clear();
@@ -1200,16 +1236,12 @@ impl Launcher {
                     .child(tr("Show everything")),
             )
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.mods.everything = !this.mods.everything;
+                this.mods.toggle_everything();
                 this.mods_search(0);
                 cx.notify();
             }));
-        // The kinds both sources serve pick theirs: CurseForge is coming soon there, shown,
-        // inert, never searched (like the Microsoft account's "Coming soon").
         // A Java instance's files come from Modrinth, for its version.
         let java = self.mods.java_for(self.mods.kind).is_some();
-        let source_note = (switches(self.mods.kind) && !java)
-            .then(|| div().flex().child(self.mods_source_switch(cx)));
         // The registry lists only what was made for Horizon: no "everything", and of the filters
         // only its categories.
         let registry = self.mods.source == SourceId::Horizon && !java;
@@ -1229,7 +1261,6 @@ impl Launcher {
                     .child(self.mods_field(cx))
                     .when(!registry && !java, |d| d.child(toggle)),
             )
-            .children(source_note)
             .child(filters)
             .children(self.mods_target_line(cx));
         // The kinds are inventory tabs on the panel that holds the open one.
@@ -1381,6 +1412,32 @@ impl Launcher {
         memo.as_ref().unwrap().1.clone()
     }
 
+    /// Whether a tracked file in `entries` asks for a native build
+    /// ([`native_status::tracked_asks_for_build`]), kept until the native folder changes.
+    fn tracked_asks_for_build(&self, entries: &[&installed::Entry]) -> bool {
+        let home = self.mods.home();
+        let key = format!(
+            "{}{}",
+            native_status::fingerprint(&home, None),
+            entries
+                .iter()
+                .map(|e| e.file.as_str())
+                .collect::<Vec<_>>()
+                .join(
+                    "
+"
+                )
+        );
+        let mut memo = self.mods.tracked_native.borrow_mut();
+        if memo.as_ref().is_none_or(|(k, _)| *k != key) {
+            let asks = entries
+                .iter()
+                .any(|e| native_status::tracked_asks_for_build(&home, &e.file));
+            *memo = Some((key, asks));
+        }
+        memo.as_ref().unwrap().1
+    }
+
     fn mods_installed_list(&mut self, cx: &mut Context<Self>) -> Option<Div> {
         let t = self.theme;
         let kind = self.mods.kind;
@@ -1416,11 +1473,8 @@ impl Launcher {
             return None;
         }
         let busy = self.mods.busy.is_some();
-        let native = !native_entries.is_empty()
-            || self.mods.java.is_none()
-                && entries
-                    .iter()
-                    .any(|e| native_status::is_native_file(&e.file));
+        let native = native_status::asks_for_build(&native_entries)
+            || self.mods.java.is_none() && self.tracked_asks_for_build(&entries);
         let left_out = if native {
             self.native_left_out()
         } else {
@@ -1615,13 +1669,11 @@ impl Launcher {
             )
         };
         // Every kind's updates at once, whichever tab is open.
-        let update_all = (!self.mods.updates.is_empty()).then(|| {
+        let updatable = self.mods_updatable().len();
+        let update_all = (updatable > 0).then(|| {
             let b = button(
                 "mods-update-all",
-                trf(
-                    "Update all ({count})",
-                    &[("count", &self.mods.updates.len().to_string())],
-                ),
+                trf("Update all ({count})", &[("count", &updatable.to_string())]),
                 Kind::Secondary,
                 &t,
             );
@@ -1674,8 +1726,11 @@ impl Launcher {
         if let Some(e) = &m.error {
             return div().child(notice(e.clone(), &t));
         }
-        if m.results.is_empty() {
-            let line = if m.searching || !m.searched {
+        let shown = m.shown();
+        if shown.is_empty() {
+            let line = if !m.results.is_empty() {
+                tr("Nothing found that runs in Horizon. Show everything lists the rest.")
+            } else if m.searching || !m.searched {
                 tr("Searching…")
             } else if let Some(target) = m.java_for(m.kind) {
                 return centered(
@@ -1692,13 +1747,14 @@ impl Launcher {
             } else {
                 tr("Nothing found that runs in Horizon. Show everything lists the rest.")
             };
-            return centered(line, &t);
+            let out = div().flex().flex_col().child(centered(line, &t));
+            return self.mods_more(out, cx);
         }
-        let result_count = m.results.len();
+        let result_count = shown.len();
         let rows = m.results_list.clone();
         let scroll = self.content_scroll.handle.clone();
         let row = |i: usize| {
-            let project = self.mods.results[i].clone();
+            let project = self.mods.results[shown[i]].clone();
             let icon = self.mods_icon(&project, 56.);
             let p = &project;
             let m = &self.mods;
@@ -1810,7 +1866,12 @@ impl Launcher {
             )
         };
         let list = rows.column(&scroll, result_count, 8., |_| false, row);
-        let mut out = div().flex().flex_col().child(list);
+        self.mods_more(div().flex().flex_col().child(list), cx)
+    }
+
+    /// The list's More, under `out` while the source has more pages.
+    fn mods_more(&self, mut out: Div, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
         let m = &self.mods;
         if m.more {
             let mut more = button("mods-more", "More", Kind::Ghost, &t);
@@ -1836,7 +1897,12 @@ pub(super) struct AutoTarget {
 
 /// Updates the registry projects of `targets`: Horizon's own instances only, never a modpack's
 /// profile, whose pack pins its mods. Returns what happened for the page's notice.
-pub(super) fn auto_update(targets: &[AutoTarget], enabled: bool) -> Vec<String> {
+/// `progress` hears the project each update is downloading.
+pub(super) fn auto_update(
+    targets: &[AutoTarget],
+    enabled: bool,
+    progress: &dyn Fn(&str),
+) -> Vec<String> {
     let mut lines = Vec::new();
     for t in targets {
         let i = &t.instance;
@@ -1847,65 +1913,18 @@ pub(super) fn auto_update(targets: &[AutoTarget], enabled: bool) -> Vec<String> 
         let ctx = horizon::auto::Context {
             in_pack: horizon::auto::in_pack(&i.home),
         };
-        if let Some(report) = horizon::auto::run(&i.home, &ctx, enabled, &|_, _| {}) {
+        if let Some(report) = horizon::auto::run(&i.home, &ctx, enabled, &|line, _| progress(line))
+        {
             lines.extend(report.lines());
         }
     }
     lines
 }
 
-/// Where a kind's tab searches first: Horizon's registry for mods and shader packs, Modrinth for
-/// the rest.
-fn source_for(kind: PackKind) -> SourceId {
-    match kind {
-        PackKind::Mod | PackKind::Shader => SourceId::Horizon,
-        PackKind::ResourcePack | PackKind::Modpack | PackKind::DataPack => SourceId::Modrinth,
-    }
-}
-
-/// Whether a kind's tab picks its source: mods, modpacks, resource packs and data packs are on
-/// both Horizon's registry and Modrinth; Horizon's shader packs are on its registry only.
-pub(super) fn switches(kind: PackKind) -> bool {
-    kind != PackKind::Shader
-}
-
-impl Launcher {
-    /// The source switch: Modrinth or Horizon's registry, CurseForge shown as coming soon and not
-    /// clickable, like the Microsoft account's "Coming soon".
-    fn mods_source_switch(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let this = cx.entity().downgrade();
-        source_switch(&self.theme, self.mods.source, move |source, _, cx| {
-            let _ = this.update(cx, |this, cx| {
-                if this.mods.source != source {
-                    this.mods.source = source;
-                    this.mods.browse.filters = Default::default();
-                    this.mods.browse.open = None;
-                    this.mods_search(0);
-                }
-                cx.notify();
-            });
-        })
-    }
-}
-
-fn source_switch(
-    t: &Theme,
-    current: SourceId,
-    on_pick: impl Fn(SourceId, &mut Window, &mut App) + Clone + 'static,
-) -> Stateful<Div> {
-    let soon = div()
-        .flex()
-        .items_center()
-        .h(px(theme::SEGMENT))
-        .px(px(14.))
-        .pb(px(2.))
-        .opacity(theme::DISABLED)
-        .child(
-            blocks::pixel(14., FontWeight::MEDIUM)
-                .text_color(t.muted)
-                .child(tr("CurseForge (coming soon)")),
-        );
-    segments("mods-source", &SOURCES, current, t, on_pick).child(soon)
+/// Where a kind's tab searches: Horizon's registry, for every kind. (A Java instance's files
+/// are still Modrinth's, for its version: `Mods::java_for`.)
+fn source_for(_kind: PackKind) -> SourceId {
+    SourceId::Horizon
 }
 
 #[cfg(test)]
@@ -1920,5 +1939,37 @@ mod tests {
         let sum = format!("SHA-512:{}", "ab".repeat(64));
         assert_eq!(short_sum(&sum), "SHA-512 abababababab…abababab");
         assert_eq!(short_sum("SHA-1:abcd"), "SHA-1:abcd");
+    }
+
+    #[test]
+    fn show_everything_lists_what_doesnt_run() {
+        let project = |id: &str| Project {
+            source: SourceId::Modrinth,
+            id: id.into(),
+            slug: id.into(),
+            title: id.into(),
+            summary: String::new(),
+            author: String::new(),
+            downloads: 0,
+            page: String::new(),
+            icon: None,
+            license: String::new(),
+            kind: PackKind::Mod,
+            game_versions: vec!["26.3".into()],
+            loaders: vec!["fabric".into()],
+            blocked: None,
+        };
+        let results: Vec<Project> = ["fabric-api", "ferrite-core", "sodium", "fresh"]
+            .into_iter()
+            .map(project)
+            .collect();
+        // The verdicts the jar checks gave; `fresh` is still being checked.
+        let support = |p: &Project| match p.id.as_str() {
+            "fabric-api" | "sodium" => Support::No("Uses mixins.".into()),
+            "ferrite-core" => Support::Works,
+            _ => Support::Partial("Checking its jar…".into()),
+        };
+        assert_eq!(shown(&results, false, support), [1, 3]);
+        assert_eq!(shown(&results, true, support), [0, 1, 2, 3]);
     }
 }

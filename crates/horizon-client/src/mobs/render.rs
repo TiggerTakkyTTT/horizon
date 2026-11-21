@@ -1775,8 +1775,8 @@ pub fn stuck_in_body(
         );
         let dxz = f64::from(dx * dx + dz * dz).sqrt() as f32;
         let degrees = |y: f32, x: f32| {
-            (horizon_core::jmath::atan2(f64::from(y), f64::from(x)) * 180.0
-                / f64::from(std::f32::consts::PI)) as f32
+            (horizon_core::jmath::atan2(f64::from(y), f64::from(x))
+                * f64::from(horizon_core::geometry::trig::RAD_TO_DEG)) as f32
         };
         let y_rot = degrees(dx, dz);
         let x_rot = degrees(dy, dxz);
@@ -2177,7 +2177,8 @@ fn render_visible(
             custom_body.is_none()
                 && extra.is_empty()
                 && m.species() != Species::SulfurCube
-                && !translucent_body(m)
+                && (!translucent_body(m)
+                    || (skin.models.tagged && paint.is_none_or(|t| t >> 24 == 0xFF)))
                 && energy_swirl(m, s.age).is_none()
                 && skin.supports(&model)
                 && all_layers.iter().all(|layer| {
@@ -2230,6 +2231,7 @@ fn render_visible(
         });
         if let (Some(tint), Some(uv)) = (paint, uv) {
             let start = out.len();
+            let first_job = skin.as_deref().map(|skin| skin.frame.jobs.len());
             put(
                 skin,
                 &model,
@@ -2259,6 +2261,11 @@ fn render_visible(
             // A body below full alpha (`forceTransparent`'s 654311423) blends too.
             if translucent_body(m) || tint >> 24 != 0xFF {
                 mark_oit(&mut out[start..]);
+                if let (Some(skin), Some(first)) = (skin.as_deref_mut(), first_job) {
+                    for job in &mut skin.frame.jobs[first..] {
+                        job.overlay |= crate::gfx::OIT_ENTITY;
+                    }
+                }
             }
         }
     };
