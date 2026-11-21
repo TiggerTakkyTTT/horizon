@@ -222,50 +222,30 @@ impl Game<'_> {
         let mut f = self.falling.extract(self.falling[i].join).unwrap();
         let original = f.clone();
         let (id, join) = (f.id, f.join);
-        if let Some(vehicle) = passenger_vehicle {
-            if let Some((position, _previous)) = self.falling_passenger_position(vehicle) {
-                // rideTick snapshots the passenger's current position before
-                // positioning it on the vehicle for this tick.
-                f.previous = original.position;
-                f.position = position;
-                self.entity_section_step(
-                    id,
-                    [original.position.x, original.position.y, original.position.z],
-                    [position.x, position.y, position.z],
-                );
-                f.velocity = Vec3::ZERO;
-                f.fall_distance = 0.0;
-                f.on_ground = false;
-                f.age = f.age.wrapping_add(1);
-                let state = f.state;
-                let y = position.y.floor() as i32;
-                let outside = y <= self.world.bottom_y() || y >= self.world.top_y();
-                let air = self.res.facts().is_air(state);
-                let expired = !air && (f.age > 100 && outside || f.age > 600);
-                if air || expired {
-                    self.sync_falling_passengers_at(
-                        id,
-                        position,
-                        original.position,
-                        stand_riders,
-                    );
-                    self.persist.falling_vehicles.remove(&id);
-                    if expired && f.drop_item && entity_drops {
-                        self.drop_falling_block(state, position);
-                    }
-                    self.falling.retire_extracted(id, join);
-                    return Ok(());
-                }
-                self.falling.put_back(i.min(self.falling.len()), f);
-                self.sync_falling_passengers(id, stand_riders);
-                self.note_falling_tick(id, join, state);
-                return Ok(());
-            }
-            // The vehicle landed or was discarded. The next tick is the
-            // falling block's own tick, just as a vanilla passenger dismounts.
-            self.persist.falling_vehicles.remove(&id);
-        }
         let step = self.fall_step(&mut f, entity_drops, entities);
+        // Vanilla ticks a passenger before positioning it on its vehicle.
+        // Keep the normal falling-block effects and landing checks, then seat
+        // it only when its own tick leaves it alive and falling.
+        if matches!(&step, Ok(FallStep::Falling))
+            && let Some(vehicle) = passenger_vehicle
+            && let Some((position, _previous)) = self.falling_passenger_position(vehicle)
+        {
+            f.previous = original.position;
+            f.position = position;
+            self.entity_section_step(
+                id,
+                [original.position.x, original.position.y, original.position.z],
+                [position.x, position.y, position.z],
+            );
+            f.velocity = Vec3::ZERO;
+            f.fall_distance = 0.0;
+            f.on_ground = false;
+            let state = f.state;
+            self.falling.put_back(i.min(self.falling.len()), f);
+            self.sync_falling_passengers(id, stand_riders);
+            self.note_falling_tick(id, join, state);
+            return Ok(());
+        }
         // Its move is filed at once, also for one that lands or drops.
         if step.is_ok() {
             let (from, to) = (original.position, f.position);
@@ -275,6 +255,11 @@ impl Game<'_> {
         let terminal_previous = f.previous;
         match step {
             Ok(FallStep::Falling) => {
+                if passenger_vehicle.is_some() {
+                    // The vehicle disappeared or the passenger fell out of
+                    // range; it continues as an ordinary falling block.
+                    self.persist.falling_vehicles.remove(&id);
+                }
                 let state = f.state;
                 self.falling.put_back(i.min(self.falling.len()), f);
                 self.sync_falling_passengers(id, stand_riders);
