@@ -30,11 +30,7 @@ impl Registry {
         Self::with_release(data, Release::Unlock)
     }
     pub(crate) fn with_release(data: &Path, release: Release) -> Result<Arc<Self>, Error> {
-        // The launcher data root is relocatable and may deliberately be a symlink. Resolve that
-        // selected root once; the shared registry still rejects links in every managed child.
-        fs::create_dir_all(data)?;
-        let data = data.canonicalize()?;
-        horizon_platform::mod_package::runtime_leases::Registry::with_release(&data, release)
+        horizon_platform::mod_package::runtime_leases::Registry::with_release(data, release)
             .map(|registry| Arc::new(Self(registry)))
             .map_err(|error| Error::from(error).on(data))
     }
