@@ -113,6 +113,11 @@ impl StartupControl {
 
 impl Drop for StartupControl {
     fn drop(&mut self) {
+        if self.thread.is_some() {
+            // An error can return before the tick loop takes over. Give the supervisor's
+            // 250 ms poller one last chance to fetch the event that ended startup.
+            std::thread::sleep(STARTUP_FAILURE_EVENT_DRAIN);
+        }
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -1226,19 +1231,15 @@ impl Game<'_> {
         // Read before the levels are made: each one's block ticks take it (`Levels::new_ticks`).
         self.levels
             .set_max_chained_neighbor_updates(props.max_chained_neighbor_updates);
-        let mut startup_control = self.control.take().map(StartupControl::start).transpose()?;
-        let prepared_result = self.prepare_world_and_rules(WorldRequest::new(
+        let startup_control = self.control.take().map(StartupControl::start).transpose()?;
+        let prepared = self.prepare_world_and_rules(WorldRequest::new(
             &folder,
             Some(&level_name),
             Some(props.seed),
             game_mode == 1,
             None,
             Arc::new(crate::game::api_values::game_rule_registry()),
-        )?);
-        if let Some(startup) = startup_control.take() {
-            self.control = startup.finish(prepared_result.is_err());
-        }
-        let prepared = prepared_result?;
+        )?)?;
         *startup_began = true;
         self.native_server_about_to_start(true);
         self.native_server_starting(true);
@@ -1541,6 +1542,11 @@ impl Game<'_> {
                     sampler: Default::default(),
                 },
             );
+        }
+        // Keep answering server-events until every startup stage (including the listen attempt)
+        // is complete; the first tick can then take over the same endpoint.
+        if let Some(startup) = startup_control {
+            self.control = startup.finish(false);
         }
         let mut next = Instant::now();
         // The panic that ended the tick loop, when one did.
