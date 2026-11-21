@@ -6003,9 +6003,21 @@ impl Game<'_> {
                     if owner_dim != self.dim {
                         if can_take && !cancel {
                             self.spawn_pearl_endermite(from);
+                            // `ThrownEnderpearl.onHit` resets its owner's portal
+                            // cooldown too. The queued cross-level path needs to
+                            // carry that reset in the host's player state.
+                            let conn = conn.expect("cross-level player owner has a connection");
+                            self.lan
+                                .as_mut()
+                                .expect("cross-level pearl owner requires a server")
+                                .play
+                                .entry(conn)
+                                .or_default()
+                                .portal
+                                .cooldown = horizon_client::nether_portal::ENTITY_DELAY;
                             self.level_teleports
                                 .push(crate::game::server_travel::LevelTeleport {
-                                    conn: conn.expect("cross-level player owner has a connection"),
+                                    conn,
                                     source: Some(owner_dim),
                                     dim: self.dim,
                                     at: [to.x, to.y, to.z],
