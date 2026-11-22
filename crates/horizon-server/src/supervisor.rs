@@ -1449,7 +1449,10 @@ mod tests {
                 state.phase == Phase::Starting
             })
             .unwrap();
-        assert!(timeout.timed_out(), "lost endpoint must not mark the game ready");
+        assert!(
+            timeout.timed_out(),
+            "lost endpoint must not mark the game ready"
+        );
         assert_eq!(state.phase, Phase::Starting);
         drop(state);
 
