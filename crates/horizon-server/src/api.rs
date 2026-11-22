@@ -1495,6 +1495,7 @@ mod tests {
             std::fs::create_dir_all(dir.join(".horizon")).unwrap();
             std::fs::write(dir.join(crate::config::FILE), crate::config::TEMPLATE).unwrap();
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
             let port = listener.local_addr().unwrap().port();
             std::fs::write(
                 horizon_server_launch::control_path(&dir),
@@ -1505,29 +1506,50 @@ mod tests {
             let heard = asked.clone();
             let failed_command = failed_command.to_owned();
             let server = std::thread::spawn(move || {
-                for _ in 0..2 {
-                    let (stream, _) = listener.accept().unwrap();
-                    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
-                    let mut writer = stream;
-                    let mut line = String::new();
-                    while std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) > 0 {
-                        let request = line.trim().to_owned();
-                        line.clear();
-                        heard.lock().unwrap().push(request.clone());
-                        let rejected = request == failed_command;
-                        let reply = if rejected {
-                            b"{\"error\":\"the dedicated server is still starting\"}\n".as_slice()
-                        } else {
-                            b"{\"ok\":true}\n".as_slice()
-                        };
-                        std::io::Write::write_all(&mut writer, reply).unwrap();
-                        if rejected {
-                            break;
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                let mut handlers = Vec::new();
+                while handlers.len() < 2 && std::time::Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            let heard = heard.clone();
+                            let failed_command = failed_command.clone();
+                            handlers.push(std::thread::spawn(move || {
+                                let mut reader =
+                                    std::io::BufReader::new(stream.try_clone().unwrap());
+                                let mut writer = stream;
+                                let mut line = String::new();
+                                while std::io::BufRead::read_line(&mut reader, &mut line)
+                                    .unwrap_or(0)
+                                    > 0
+                                {
+                                    let request = line.trim().to_owned();
+                                    line.clear();
+                                    heard.lock().unwrap().push(request.clone());
+                                    let reply = if request == failed_command {
+                                        b"{\"error\":\"the dedicated server is still starting\"}\n"
+                                            .as_slice()
+                                    } else {
+                                        b"{\"ok\":true}\n".as_slice()
+                                    };
+                                    std::io::Write::write_all(&mut writer, reply).unwrap();
+                                    // Keep this connection alive after an error. An old caller that
+                                    // ignores the JSON error will continue to flush and can expose
+                                    // the false-positive backup this test guards against.
+                                    if request == "console save-on" {
+                                        return;
+                                    }
+                                }
+                            }));
                         }
-                        if request == "console save-on" {
-                            return;
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
                         }
+                        Err(error) => panic!("accept control request: {error}"),
                     }
+                }
+                assert_eq!(handlers.len(), 2, "save-on uses a separate connection");
+                for handler in handlers {
+                    handler.join().unwrap();
                 }
             });
 

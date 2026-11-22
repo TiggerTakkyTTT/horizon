@@ -1592,9 +1592,6 @@ impl Game<'_> {
         // is complete; the first tick can then take over the same endpoint.
         if let Some(startup) = startup_control {
             self.control = startup.finish(false);
-            if self.control.is_some() {
-                log("INFO", "Horizon management control ready");
-            }
         }
         let mut next = Instant::now();
         // The panic that ended the tick loop, when one did.

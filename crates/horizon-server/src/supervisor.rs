@@ -580,13 +580,10 @@ fn roll_back(shared: &Shared, dir: &Path, config: &Config, w: &Watch, reason: &s
     );
 }
 
-/// The game is up: it logged `Done` and answered a status request (the sampler's, for this process).
+/// Readiness was confirmed for the current game process after its `Done` line.
 fn up(shared: &Shared) -> bool {
     let state = shared.state.lock().unwrap();
-    state.phase == Phase::Running
-        && state.engine_pid.is_some()
-        && state.sample["pid"].as_u64() == state.engine_pid.map(u64::from)
-        && !state.sample["game"].is_null()
+    state.phase == Phase::Running && state.engine_pid.is_some()
 }
 
 /// Looks for a newer release a minute after the start and then every 6 hours (installed servers only;
@@ -648,19 +645,73 @@ fn console_lines() -> mpsc::Receiver<String> {
     rx
 }
 
-/// Copies the game's output to ours and to the API's log, line by line. The explicit management-ready
-/// line means startup finished and the control endpoint has been handed to the normal tick loop.
-/// The message of a game's INFO log line (`[12:00:00] [Server thread/INFO]: Done (…`), from the
-/// first `/INFO]: ` on; "" for any other line.
+/// Copies the game's output to ours and to the API's log, line by line. The message of a game's INFO
+/// log line (`[12:00:00] [Server thread/INFO]: Done (…`), from the first `/INFO]: ` on; "" for any other line.
 fn info_message(line: &str) -> &str {
     line.split_once("/INFO]: ").map_or("", |(_, m)| m)
 }
 
-fn pump(shared: &Arc<Shared>, from: impl Read + Send + 'static, to_stderr: bool) {
+fn is_done_message(message: &str) -> bool {
+    message.starts_with("Done (")
+}
+
+/// Marks the process ready only if it is still the current process in its startup phase.
+fn mark_running(shared: &Shared, pid: u32) -> bool {
+    let mut state = shared.state.lock().unwrap();
+    if state.engine_pid != Some(pid) || state.phase != Phase::Starting {
+        return false;
+    }
+    state.phase = Phase::Running;
+    drop(state);
+    shared.emit("phase", json!({ "phase": "running" }));
+    crate::management::started(shared);
+    true
+}
+
+/// After vanilla's startup line, wait for a usable status reply. Older game builds do not have the
+/// temporary startup endpoint, and No AI deliberately omits the control endpoint, so a missing or
+/// refused endpoint after `Done` is also a valid readiness signal.
+fn wait_for_ready(shared: Arc<Shared>, pid: u32) {
+    loop {
+        let starting = {
+            let state = shared.state.lock().unwrap();
+            state.engine_pid == Some(pid) && state.phase == Phase::Starting
+        };
+        if !starting {
+            return;
+        }
+
+        match engine::Control::connect(&shared.dir) {
+            Ok(mut control) => {
+                if control
+                    .ask("server-status")
+                    .is_ok_and(|reply| reply.get("error").is_none())
+                {
+                    mark_running(&shared, pid);
+                    return;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                mark_running(&shared, pid);
+                return;
+            }
+            Err(_) => {}
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn pump(shared: &Arc<Shared>, from: impl Read + Send + 'static, to_stderr: bool, pid: u32) {
     let shared = shared.clone();
     let _ = thread::Builder::new()
         .name("engine-log".into())
         .spawn(move || {
+            let mut readiness_started = false;
             for line in BufReader::new(from).lines() {
                 let Ok(line) = line else { break };
                 if to_stderr {
@@ -670,19 +721,12 @@ fn pump(shared: &Arc<Shared>, from: impl Read + Send + 'static, to_stderr: bool)
                     // The game's own message, not text a player put in it: chat is logged after
                     // `/INFO]: <name> `, so a player typing `/INFO]: Stopping server` matches nothing.
                     let message = info_message(&line);
-                    if message == "Horizon management control ready" {
-                        let up = {
-                            let mut state = shared.state.lock().unwrap();
-                            let starting = state.phase == Phase::Starting;
-                            if starting {
-                                state.phase = Phase::Running;
-                            }
-                            starting
-                        };
-                        if up {
-                            shared.emit("phase", serde_json::json!({ "phase": "running" }));
-                            crate::management::started(&shared);
-                        }
+                    if is_done_message(message) && !readiness_started {
+                        readiness_started = true;
+                        let ready = shared.clone();
+                        let _ = thread::Builder::new()
+                            .name("engine-readiness".into())
+                            .spawn(move || wait_for_ready(ready, pid));
                     } else if message.starts_with("Stopping server")
                         || message.starts_with("Stopping in ")
                     {
@@ -806,11 +850,12 @@ fn supervise(
     console: &mpsc::Receiver<String>,
     watch: &mut Option<Watch>,
 ) -> Exit {
+    let pid = child.id();
     if let Some(out) = child.stdout.take() {
-        pump(shared, out, false);
+        pump(shared, out, false, pid);
     }
     if let Some(err) = child.stderr.take() {
-        pump(shared, err, true);
+        pump(shared, err, true, pid);
     }
     let mut stdin = child.stdin.take();
     let mut stopping: Option<Instant> = None;
@@ -1004,9 +1049,12 @@ mod tests {
         assert!(!stopping(
             "[12:00:00] [Server thread/INFO]: [Kim: Stopping server]"
         ));
-        assert!(
-            info_message("[12:00:00] [Server thread/INFO]: Done (2.1s)!").starts_with("Done (")
-        );
+        assert!(is_done_message(info_message(
+            "[12:00:00] [Server thread/INFO]: Done (2.1s)!"
+        )));
+        assert!(!is_done_message(info_message(
+            "[12:00:00] [Server thread/INFO]: <Kim> Done (2.1s)!"
+        )));
     }
 
     #[test]
@@ -1197,7 +1245,7 @@ mod tests {
     }
 
     #[test]
-    fn up_means_done_and_a_status_reply_from_this_game() {
+    fn up_means_this_process_passed_its_readiness_check() {
         let shared = Shared::with_install(Path::new("."), None);
         let set = |phase, pid: Option<u32>, sample: serde_json::Value| {
             let mut state = shared.state.lock().unwrap();
@@ -1210,20 +1258,132 @@ mod tests {
         );
         assert!(!up(&shared));
         set(Phase::Running, Some(7), json!({ "pid": 7, "game": null }));
-        assert!(!up(&shared));
-        // A sample of the game before the restart doesn't count.
+        // No AI has no status endpoint; Running is set only after Done for this process.
+        assert!(up(&shared));
+        // A running phase without a current process cannot satisfy an update check.
         set(
-            Phase::Running,
+            Phase::Starting,
             Some(8),
             json!({ "pid": 7, "game": { "tps": 20.0 } }),
         );
         assert!(!up(&shared));
         set(
             Phase::Running,
-            Some(8),
+            None,
             json!({ "pid": 8, "game": { "tps": 20.0 } }),
         );
-        assert!(up(&shared));
+        assert!(!up(&shared));
+    }
+
+    #[test]
+    fn pump_waits_for_a_non_error_status_after_done() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::TcpListener,
+            sync::mpsc,
+        };
+
+        let dir =
+            std::env::temp_dir().join(format!("horizon-server-readiness-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".horizon")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::fs::write(
+            launch::control_path(&dir),
+            json!({ "port": port, "token": "t" }).to_string(),
+        )
+        .unwrap();
+
+        let (error_tx, error_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut first = listener.accept().unwrap().0;
+            let mut reader = BufReader::new(first.try_clone().unwrap());
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            first.write_all(b"{\"ok\":true}\n").unwrap();
+            request.clear();
+            reader.read_line(&mut request).unwrap();
+            assert_eq!(request.trim(), "server-status");
+            first
+                .write_all(b"{\"error\":\"the dedicated server is still starting\"}\n")
+                .unwrap();
+            error_tx.send(()).unwrap();
+            continue_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            drop(reader);
+            drop(first);
+
+            let mut second = listener.accept().unwrap().0;
+            let mut reader = BufReader::new(second.try_clone().unwrap());
+            request.clear();
+            reader.read_line(&mut request).unwrap();
+            second.write_all(b"{\"ok\":true}\n").unwrap();
+            request.clear();
+            reader.read_line(&mut request).unwrap();
+            assert_eq!(request.trim(), "server-status");
+            second.write_all(b"{\"tps\":20.0}\n").unwrap();
+        });
+
+        let shared = Shared::with_install(&dir, None);
+        let pid = std::process::id();
+        shared.state.lock().unwrap().engine_pid = Some(pid);
+        pump(
+            &shared,
+            std::io::Cursor::new(b"[12:00:00] [Server thread/INFO]: Done (2.1s)!\n".to_vec()),
+            false,
+            pid,
+        );
+        error_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(shared.phase(), Phase::Starting);
+        continue_tx.send(()).unwrap();
+
+        let state = shared.state.lock().unwrap();
+        let (state, timeout) = shared
+            .event_added
+            .wait_timeout_while(state, Duration::from_secs(3), |state| {
+                state.phase != Phase::Running
+            })
+            .unwrap();
+        assert!(
+            !timeout.timed_out(),
+            "the successful status reply marks ready"
+        );
+        assert_eq!(state.phase, Phase::Running);
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pump_accepts_done_when_no_control_endpoint_exists() {
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-server-no-control-readiness-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".horizon")).unwrap();
+        let shared = Shared::with_install(&dir, None);
+        let pid = std::process::id();
+        shared.state.lock().unwrap().engine_pid = Some(pid);
+        pump(
+            &shared,
+            std::io::Cursor::new(b"[12:00:00] [Server thread/INFO]: Done (2.1s)!\n".to_vec()),
+            false,
+            pid,
+        );
+        let state = shared.state.lock().unwrap();
+        let (state, timeout) = shared
+            .event_added
+            .wait_timeout_while(state, Duration::from_secs(3), |state| {
+                state.phase != Phase::Running
+            })
+            .unwrap();
+        assert!(
+            !timeout.timed_out(),
+            "Done without a control endpoint is ready"
+        );
+        assert_eq!(state.phase, Phase::Running);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A stand-in for the game: a shell script, its stdin and output piped as the engine's are.
