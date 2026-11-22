@@ -248,28 +248,12 @@ fn expand(mut implementation: ItemImpl, export: bool) -> TokenStream {
     }
     let export = if export && part.is_none() {
         let ty = &implementation.self_ty;
-        let registrations: proc_macro2::TokenStream =
-            match std::env::var("HORIZON_GUEST_REGISTRATIONS") {
-                Ok(source) => match source.parse::<proc_macro2::TokenStream>() {
-                    Ok(tokens) => tokens,
-                    Err(error) => {
-                        return syn::Error::new_spanned(
-                            &implementation,
-                            format!("guest registrations: {error}"),
-                        )
-                        .to_compile_error()
-                        .into();
-                    }
-                },
-                Err(_) => quote!(),
-            };
         quote! {
             pub fn hooks() -> Box<dyn mod_api::Hooks> { Box::new(<#ty as Default>::default()) }
             /// The mod's hooks for the guest runtime in `mod_api::wire::guest`, when built to wasm.
             #[cfg(target_arch = "wasm32")]
             #[unsafe(no_mangle)]
             fn __horizon_mod_hooks() -> Box<dyn mod_api::Hooks> {
-                #registrations
                 hooks()
             }
         }
@@ -279,8 +263,9 @@ fn expand(mut implementation: ItemImpl, export: bool) -> TokenStream {
     quote!(#implementation #export).into()
 }
 
-/// Generate the panicking defaults of a host area from each method's access declaration.
+/// Generate host area defaults from each method's access declaration.
 /// The same declarations drive game forwarders in the build-time API generator.
+/// `#[default_on_unavailable]` opts into a default value in place of a panic.
 #[proc_macro_attribute]
 pub fn host_area(_attribute: TokenStream, input: TokenStream) -> TokenStream {
     let mut area = parse_macro_input!(input as syn::ItemTrait);
@@ -320,14 +305,25 @@ pub fn host_area(_attribute: TokenStream, input: TokenStream) -> TokenStream {
             Ok(level) => level,
             Err(error) => return error.to_compile_error().into(),
         };
+        let default_on_unavailable = method
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("default_on_unavailable"));
         method.attrs.retain(|attr| {
-            !attr.path().is_ident("static_call") && !attr.path().is_ident("service")
+            !attr.path().is_ident("static_call")
+                && !attr.path().is_ident("service")
+                && !attr.path().is_ident("raw_text")
+                && !attr.path().is_ident("default_on_unavailable")
         });
         let operation = method.sig.ident.to_string();
         let label = format!("{union}::{operation}");
-        method.default = Some(syn::parse_quote!({
-            crate::world::phase::unprovided(#label, #operation, crate::world::phase::LoadAccess::#level)
-        }));
+        method.default = Some(if default_on_unavailable {
+            syn::parse_quote!({ Default::default() })
+        } else {
+            syn::parse_quote!({
+                crate::world::phase::unprovided(#label, #operation, crate::world::phase::LoadAccess::#level)
+            })
+        });
         method.semi_token = None;
     }
     quote!(#area).into()

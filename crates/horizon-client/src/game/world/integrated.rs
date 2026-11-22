@@ -54,6 +54,17 @@ pub(super) const NO_ANSWER: &str =
 const SERVER_THREAD_STACK: usize =
     horizon_guest_stack::GUEST_STACK_BYTES + horizon_guest_stack::HOST_HEADROOM;
 
+/// `horizon_threads::server_core::take`, told in the log: the server thread keeps one physical
+/// core while cooperating workers avoid it, until the hold drops as the thread ends.
+pub(super) fn take_server_core() -> Option<horizon_threads::server_core::ServerCore> {
+    let core = horizon_threads::server_core::take()?;
+    log::info!(
+        "Horizon: the server thread is pinned to CPUs {:?}",
+        core.cpus()
+    );
+    Some(core)
+}
+
 /// The server thread's stack size: [`SERVER_THREAD_STACK`], or what `RUST_MIN_STACK` asks for
 /// when that is larger. std reads the variable only for a thread spawned without a size, and
 /// harnesses raise it for this thread (`tools/test_wind_burst_hook.py`, the parity tools).
@@ -570,6 +581,8 @@ impl Game<'_> {
             let _finished = Finished(server_flags.clone());
             // MinecraftServer.spin's Thread.setPriority(8).
             horizon_threads::favour_current();
+            // A core of its own, its SMT sibling left empty, while it runs.
+            let _core = take_server_core();
             let result = serve(
                 &res,
                 pack,
@@ -787,6 +800,12 @@ impl Game<'_> {
         opening: Opening,
     ) -> Result<()> {
         self.integrated_open(&launch, &flags, tasks, ready, opening)?;
+        // Test-only: the dedicated scene queues `tick freeze` before the first tick; here no tick may run
+        // before the script's own freeze, or the world spawns mobs from an unsynced level random.
+        #[cfg(feature = "state-digest")]
+        if std::env::var_os("HORIZON_STATE_DIGEST_FREEZE").is_some_and(|v| v == "1") {
+            self.clock.set_frozen(true);
+        }
         // The server thread's `server_started` site, before the tick loop.
         self.native_lifecycle_world_ready();
         if let (Some(script), Some(output)) = (
@@ -1110,10 +1129,12 @@ pub(super) struct ServerOptions {
 impl Game<'_> {
     /// IntegratedServer.teardownPublishedState, also reached when a shutdown
     /// callback unwinds before the normal stop path can retire the server.
-    pub(super) fn stop_serving(&mut self) {
+    pub(in crate::game) fn stop_serving(&mut self) {
         if let Some(s) = self.serving.take() {
             s.flags.published.store(0, Ordering::Relaxed);
         }
+        // What a mod switched on for this server (packet counting, mob sampling) ends with it.
+        self.stop_mod_diagnostics();
     }
 
     /// Whether this game is an integrated server's.
@@ -1125,6 +1146,34 @@ impl Game<'_> {
     /// the owner's level, at the owner permission level. The feedback goes to
     /// the owner's chat and is returned.
     pub(super) fn owner_console_command(&mut self, command: &str) -> Vec<String> {
+        // Test-only, as on the dedicated console: sync the randoms on this server thread, in the owner's level.
+        #[cfg(feature = "state-digest")]
+        if let Some(rest) = command.trim_start_matches('/').strip_prefix("digest-sync")
+            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            let args: Vec<&str> = rest.split_whitespace().collect();
+            // The owner's level is the one to sync. It must be the level in place: syncing any other one, or
+            // the level in place after a failed switch, would report success for the wrong level.
+            let owner = self.serving.as_ref().map(|s| s.owner);
+            let owner_dim = self.lan.as_ref().and_then(|h| {
+                h.hub.guests.iter().find(|g| Some(g.uuid) == owner).map(|g| g.dimension.clone())
+            });
+            let Some(owner_dim) = owner_dim else {
+                return vec!["digest-sync: the owner is not in the world yet".to_owned()];
+            };
+            if super::Dim::from_id(&owner_dim) != self.dim {
+                return vec![format!(
+                    "digest-sync: the owner is in {owner_dim}, not the level in place; nothing changed"
+                )];
+            }
+            return vec![match self.state_digest_sync(&args) {
+                Ok(()) => {
+                    self.state_digest_rank_joins();
+                    "digest-sync done".to_owned()
+                }
+                Err(e) => format!("digest-sync: {e}"),
+            }];
+        }
         let Some(owner) = self.serving.as_ref().map(|s| s.owner) else {
             return Vec::new();
         };

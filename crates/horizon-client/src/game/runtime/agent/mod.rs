@@ -703,6 +703,9 @@ impl Game<'_> {
             Mode::LowDiskSpace { world } => {
                 json!({ "mode": "low-disk-space", "folder": world.folder, "name": world.name })
             }
+            Mode::WorldRequest { world, mods } => {
+                json!({ "mode": "world-request", "folder": world.folder, "name": world.name, "mods": mods })
+            }
             Mode::MissingBiomeRegions { world, missing } => {
                 json!({ "mode": "missing-biome-regions", "folder": world.folder, "name": world.name, "missing": missing.iter().map(|(owner, region)| json!({ "mod": owner, "region": region })).collect::<Vec<_>>() })
             }
@@ -1975,9 +1978,11 @@ impl Game<'_> {
             return;
         }
         if now >= g.deadline {
+            let why = (self.renderer.as_ref().and_then(|r| r.not_drawn()))
+                .map_or("unknown", |n| n.as_str());
+            let error = format!("no frame was drawn to turn the view ({why})");
             let _ = g.reply.send(
-                json!({ "error": "no frame was drawn to turn the view", "yaw": self.yaw, "pitch": self.pitch })
-                    .to_string(),
+                json!({ "error": error, "yaw": self.yaw, "pitch": self.pitch }).to_string(),
             );
             return;
         }

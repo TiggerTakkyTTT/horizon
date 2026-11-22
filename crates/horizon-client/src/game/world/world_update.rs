@@ -136,11 +136,15 @@ impl Game<'_> {
             _ => Some(self.streaming.lod_source()),
         };
         if let Some(source) = source {
-            self.lod = Some(horizon_client::lod::Lod::new(source, self.worker_context()));
+            let lod = horizon_client::lod::Lod::new(source, self.worker_context());
+            // Far tiles are never in the ray scene: the arenas' looks alone.
+            lod.set_looks(self.streaming.looks, self.streaming.nether_shading);
+            lod.set_shader_pack(self.streaming.shader_pack);
+            self.lod = Some(lod);
             self.lod_observe.extend(self.world.chunks.keys().copied());
         }
     }
-    pub(super) fn update_world(&mut self) {
+    pub(in crate::game) fn update_world(&mut self) {
         if let Err(e) = horizon_client::spans::time("poll_remote", || self.poll_remote()) {
             log::warn!("Horizon: {e}");
         }
@@ -148,12 +152,17 @@ impl Game<'_> {
             log::warn!("Horizon Studio replay: {e}");
         }
         // The renderer laid translucent quads out again (a shader pack's flat terrain came
-        // or went) and dropped every section and far tile: meshed again, as for a new one.
+        // or went), or its pages couldn't take the quads' looks it turned on, and dropped every
+        // section and far tile: meshed again, as for a new one, with the looks it takes now
+        // (`shader_pack_inputs` would otherwise mesh them all again for the looks).
         if self
             .renderer
             .as_mut()
             .is_some_and(Renderer::take_dropped_sections)
         {
+            let r = self.renderer.as_ref();
+            self.streaming.looks = r.is_some_and(|r| r.terrain_looks());
+            self.streaming.ray_looks = r.is_some_and(|r| r.ray_looks());
             self.clear_lod();
             self.all_sections_changed();
         }
@@ -284,9 +293,8 @@ impl Game<'_> {
             let _span = horizon_client::spans::guard("unload_block_entities");
             let gone: horizon_client::fast_hash::FxHashSet<(i32, i32)> =
                 unloaded.iter().map(|c| (c.x, c.z)).collect();
-            self.world
-                .block_entities
-                .unload(|p| gone.contains(&(p.0 >> 4, p.2 >> 4)));
+            let gone_chunks: Vec<(i32, i32)> = gone.iter().copied().collect();
+            self.world.block_entities.unload_chunks(&gone_chunks);
             self.world
                 .block_names
                 .retain(|p, _| !gone.contains(&(p.0 >> 4, p.2 >> 4)));
@@ -404,6 +412,10 @@ impl Game<'_> {
                 self.streaming.free(spent);
             }
             renderer.remove_columns(unloaded.iter().map(|c| (c.x, c.z)));
+            // Sections whose mesh the arena refused: meshed again, as an edit's section
+            // is, once their retry comes due. The mesh is dropped with the uploads above,
+            // so this is the only way back for them.
+            renderer.queue_upload_retries(&mut self.world.dirty_sections, now);
             // Meshes in the works are the view's terrain while it is new, then edits'.
             let meshing = self.streaming.busy() || !self.pending_uploads.is_empty();
             let sampling = self.lod.as_ref().is_some_and(|lod| lod.sampling());
@@ -452,5 +464,66 @@ impl Game<'_> {
                 });
             }
         }
+    }
+    /// Run `f` inside a local player block-edit scope so writes record `World::immediate_sections`.
+    pub(in crate::game) fn with_player_block_edit<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.world.begin_player_edit();
+        let out = f(self);
+        self.world.end_player_edit();
+        out
+    }
+
+    /// Rebuild sections dirtied by player block edits (or nearby dirty sections when
+    /// `prioritizeChunkUpdates == 2`) and upload them before the current frame renders, matching
+    /// vanilla's `SectionRenderDispatcher.rebuildSectionSync`. Under Threaded (`0`, default),
+    /// no main-thread meshing occurs.
+    pub(in crate::game) fn flush_immediate_meshes(&mut self) {
+        let mode = self.settings.prioritize_chunk_updates;
+        if mode == 0 || self.title.is_some() || self.renderer.is_none() {
+            self.world.immediate_sections.clear();
+            return;
+        }
+        if mode >= 2
+            && let Some(p) = self.player.as_ref()
+        {
+            let camera_block = [
+                p.position.x.floor() as i32,
+                p.position.y.floor() as i32,
+                p.position.z.floor() as i32,
+            ];
+            self.world.mark_nearby_dirty_immediate(
+                camera_block,
+                horizon_client::streaming::immediate_mesh::NEARBY_IMMEDIATE_DIST_SQ,
+                horizon_client::streaming::immediate_mesh::IMMEDIATE_MESH_LIMIT,
+            );
+        }
+        if self.world.immediate_sections.is_empty() {
+            return;
+        }
+        self.observe_light_edits();
+        self.ask_edited_light_emission();
+        let uploads = self.streaming.mesh_immediate(&mut self.world, mode);
+        if uploads.is_empty() {
+            return;
+        }
+        let fresh: horizon_client::fast_hash::FxHashSet<(i32, i32, i32)> =
+            uploads.iter().map(|(k, _)| *k).collect();
+        let spent: Vec<_> = self
+            .pending_uploads
+            .extract_if(.., |(k, _)| fresh.contains(k))
+            .collect();
+        if !spent.is_empty() {
+            self.streaming.free(spent);
+        }
+        if self.lod.is_some() {
+            self.lod_observe
+                .extend(uploads.iter().map(|(key, _)| (key.0, key.2)));
+        }
+        if let Some(renderer) = self.renderer.as_mut() {
+            for (key, mesh) in &uploads {
+                renderer.upload(*key, mesh);
+            }
+        }
+        self.streaming.free(uploads);
     }
 }

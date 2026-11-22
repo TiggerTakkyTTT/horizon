@@ -29,8 +29,8 @@ The build a mod is made for is its pin, always a full commit sha in the file:
 - a native mod: `[native] horizon` in `horizon-mod.toml`;
 - a wasm mod: `sdk` under `[package.metadata.horizon]` in `Cargo.toml`.
 
-`cargo horizon-mod new` writes the current Nightly's build, or `--horizon`'s. `cargo horizon-mod update` moves a
-native mod's pin. Wherever a build is given, these forms are accepted:
+`cargo horizon-mod new` writes the current Nightly's build, or `--horizon`'s. `cargo horizon-mod update` moves either
+pin. Wherever a build is given, these forms are accepted:
 
 | Written | Means |
 |---|---|
@@ -69,7 +69,7 @@ launcher or sent to a registry.
 Every SDK base is checked the same way, against Horizon's signature. The launcher's own copies are described in
 [Cache and disk](../../how-to/native-mods/10-cache-and-disk.md).
 
-The internals commands (`internals add`, `inject add`, `inject update`, and `update` on a mod with an `internals`
-list or `[[inject]]` rows) read `internals.json` and `points.json` from the pinned build's signed SDK, through the
+The internals commands (`internals add`, and `update` on a mod with an `internals` list) read `internals.json`
+from the pinned build's signed SDK, through the
 same fetch and `HORIZON_SDK_BASE`: its `build-data.tar.xz` is unpacked once into
 `.horizon/cache/<build id>/build-data/`. A build with no SDK release is refused by name.
