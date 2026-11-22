@@ -393,6 +393,8 @@ fn state_name(s: &str) -> bool {
 struct BlockFile {
     template: String,
     #[serde(default)]
+    growing_plant: Option<GrowingPlant>,
+    #[serde(default)]
     properties: BlockProperties,
     shapes: Option<BlockShapes>,
     collision_shapes: Option<BlockShapes>,
@@ -447,6 +449,9 @@ pub struct Block {
     pub id: String,
     /// The vanilla block it copies, `minecraft:<path>`.
     pub template: String,
+    /// A custom growing-plant family, declared on its head block. The same
+    /// pair is used for survival checks of both the head and body blocks.
+    pub growing_plant: Option<GrowingPlant>,
     pub properties: BlockProperties,
     pub shapes: Option<BlockShapes>,
     pub collision_shapes: Option<BlockShapes>,
@@ -501,6 +506,38 @@ pub struct Block {
     pub sign_text_glow: Option<bool>,
     /// The block farmland turns into; the template's base when unset.
     pub base_block: Option<String>,
+}
+
+/// The paired blocks and vertical direction of a content growing plant.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GrowingPlant {
+    /// The declared growing-plant head block id.
+    pub head: String,
+    /// The declared growing-plant body block id.
+    pub body: String,
+    /// Direction in which the family grows.
+    pub direction: GrowingPlantDirection,
+    /// Whether the family refuses support blocks tagged `cannot_support_kelp`.
+    #[serde(default)]
+    pub kelp: bool,
+}
+
+impl GrowingPlant {
+    pub fn direction_name(&self) -> &'static str {
+        match self.direction {
+            GrowingPlantDirection::Up => "up",
+            GrowingPlantDirection::Down => "down",
+        }
+    }
+}
+
+/// The vertical direction of a growing plant.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GrowingPlantDirection {
+    Up,
+    Down,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1228,6 +1265,7 @@ impl Content {
             let block = Block {
                 id: block,
                 template: file.template,
+                growing_plant: file.growing_plant,
                 properties: file.properties,
                 shapes: file.shapes,
                 collision_shapes: file.collision_shapes,
@@ -1259,6 +1297,7 @@ impl Content {
             }
             self.blocks.push(block);
         }
+        check_growing_plant_pairs(&self.blocks)?;
         // After every block, so a wall form may be declared in a later file.
         check_sign_walls(&self.blocks.iter().collect::<Vec<_>>())?;
         let mut remainders = Vec::new();
@@ -1694,6 +1733,20 @@ fn check_block(file: &Block) -> Result<(), String> {
             return Err("base_block is a block id, namespace:path".into());
         }
     }
+    if let Some(family) = &file.growing_plant {
+        if file.id != family.head {
+            return Err("growing_plant must be declared on its head block".into());
+        }
+        if !namespaced_id(&family.head) || !namespaced_id(&family.body) {
+            return Err("growing_plant head and body are namespaced block ids".into());
+        }
+        if family.head == family.body {
+            return Err("growing_plant head and body must be different blocks".into());
+        }
+        if growing_plant_body_template(&file.template).is_none() {
+            return Err("growing_plant needs a vanilla growing-plant head template".into());
+        }
+    }
     // Every vanilla `SignBlock`'s id ends in `_sign`, and no other block's does.
     let sign = file.template.ends_with("_sign");
     if let Some(wood) = &file.wood_type {
@@ -1763,6 +1816,42 @@ fn check_block(file: &Block) -> Result<(), String> {
         }
         if !namespaced_id(wall) {
             return Err("wall_block is a block id, namespace:path".into());
+        }
+    }
+    Ok(())
+}
+
+fn growing_plant_body_template(head_template: &str) -> Option<&'static str> {
+    match head_template {
+        "minecraft:kelp" => Some("minecraft:kelp_plant"),
+        "minecraft:cave_vines" => Some("minecraft:cave_vines_plant"),
+        "minecraft:twisting_vines" => Some("minecraft:twisting_vines_plant"),
+        "minecraft:weeping_vines" => Some("minecraft:weeping_vines_plant"),
+        _ => None,
+    }
+}
+
+fn check_growing_plant_pairs(blocks: &[Block]) -> Result<(), String> {
+    for head in blocks {
+        let Some(family) = &head.growing_plant else {
+            continue;
+        };
+        let body = blocks
+            .iter()
+            .find(|block| block.id == family.body)
+            .ok_or_else(|| {
+                format!(
+                    "{}: growing_plant body {} is not declared",
+                    head.id, family.body
+                )
+            })?;
+        let expected_template = growing_plant_body_template(&head.template)
+            .expect("check_block validates growing_plant head templates");
+        if body.template != expected_template {
+            return Err(format!(
+                "{}: growing_plant body {} must use template {expected_template}",
+                head.id, family.body
+            ));
         }
     }
     Ok(())
@@ -2205,6 +2294,7 @@ capabilities = ["registries"]
             [Block {
                 id: "ruby:ruby_block".into(),
                 template: "minecraft:iron_block".into(),
+                growing_plant: None,
                 shapes: None,
                 collision_shapes: None,
                 outline_context_shapes: BTreeMap::new(),

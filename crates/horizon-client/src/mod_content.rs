@@ -1943,7 +1943,22 @@ impl<'a> Plan<'a> {
                     }
                 }
             }
-            "worldgen/blocks/survival-rules.json" => self.names(doc, false),
+            "worldgen/blocks/survival-rules.json" => {
+                self.names(doc, false);
+                for block in &self.blocks {
+                    let Some(family) = &block.decl.growing_plant else {
+                        continue;
+                    };
+                    let rule = J::Obj(vec![
+                        ("head".into(), J::Str(family.head.clone())),
+                        ("body".into(), J::Str(family.body.clone())),
+                        ("direction".into(), J::Str(family.direction_name().into())),
+                        ("kelp".into(), J::Bool(family.kelp)),
+                    ]);
+                    doc.set(&family.head, rule.clone());
+                    doc.set(&family.body, rule);
+                }
+            }
             "worldgen/blocks/survival-extra-definitions.json" => {
                 if let Some(map) = doc.at("ignition_odds") {
                     self.names(map, false);
