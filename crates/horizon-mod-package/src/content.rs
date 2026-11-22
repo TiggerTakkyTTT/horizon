@@ -1105,6 +1105,7 @@ impl Content {
             }
         }
         let all: Vec<&Block> = self.blocks.iter().chain(blocks).collect();
+        check_growing_plant_pairs(&all)?;
         check_sign_walls(&all)?;
         for item in items {
             let id = item.id.as_str();
@@ -1297,7 +1298,7 @@ impl Content {
             }
             self.blocks.push(block);
         }
-        check_growing_plant_pairs(&self.blocks)?;
+        check_growing_plant_pairs(&self.blocks.iter().collect::<Vec<_>>())?;
         // After every block, so a wall form may be declared in a later file.
         check_sign_walls(&self.blocks.iter().collect::<Vec<_>>())?;
         let mut remainders = Vec::new();
@@ -1831,11 +1832,18 @@ fn growing_plant_body_template(head_template: &str) -> Option<&'static str> {
     }
 }
 
-fn check_growing_plant_pairs(blocks: &[Block]) -> Result<(), String> {
+fn check_growing_plant_pairs(blocks: &[&Block]) -> Result<(), String> {
+    let mut body_owners = BTreeMap::new();
     for head in blocks {
         let Some(family) = &head.growing_plant else {
             continue;
         };
+        if let Some(previous_head) = body_owners.insert(family.body.as_str(), head.id.as_str()) {
+            return Err(format!(
+                "{}: growing_plant body {} is already assigned to {previous_head}",
+                head.id, family.body
+            ));
+        }
         let body = blocks
             .iter()
             .find(|block| block.id == family.body)

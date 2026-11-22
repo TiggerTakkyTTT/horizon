@@ -1876,6 +1876,29 @@ impl<'a> Plan<'a> {
                         blocks.push(v);
                     }
                 }
+                for head in &self.blocks {
+                    let Some(family) = &head.decl.growing_plant else {
+                        continue;
+                    };
+                    for id in [&family.head, &family.body] {
+                        let row = blocks
+                            .iter_mut()
+                            .find(|row| matches!(row.get("name"), Some(J::Str(name)) if name == id))
+                            .ok_or("growing-plant family has no block-behaviour row")?;
+                        let mut fields = row
+                            .get("fields")
+                            .cloned()
+                            .unwrap_or(J::Obj(Default::default()));
+                        fields.set("growingPlantHead", J::Str(family.head.clone()));
+                        fields.set("growingPlantBody", J::Str(family.body.clone()));
+                        fields.set("growingPlantKelp", J::Bool(family.kelp));
+                        fields.set(
+                            "growthDirection",
+                            J::Str(family.direction_name().to_ascii_uppercase()),
+                        );
+                        row.set("fields", fields);
+                    }
+                }
                 self.items(doc.at("items").ok_or("no items")?, false)?;
                 for odds in ["fire/burnOdds", "fire/igniteOdds"] {
                     if let Some(map) = doc.at(odds) {
