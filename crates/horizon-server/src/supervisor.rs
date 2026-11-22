@@ -648,8 +648,8 @@ fn console_lines() -> mpsc::Receiver<String> {
     rx
 }
 
-/// Copies the game's output to ours and to the API's log, line by line; the game's `Done` line means it
-/// is up.
+/// Copies the game's output to ours and to the API's log, line by line. The explicit management-ready
+/// line means startup finished and the control endpoint has been handed to the normal tick loop.
 /// The message of a game's INFO log line (`[12:00:00] [Server thread/INFO]: Done (…`), from the
 /// first `/INFO]: ` on; "" for any other line.
 fn info_message(line: &str) -> &str {
@@ -670,7 +670,7 @@ fn pump(shared: &Arc<Shared>, from: impl Read + Send + 'static, to_stderr: bool)
                     // The game's own message, not text a player put in it: chat is logged after
                     // `/INFO]: <name> `, so a player typing `/INFO]: Stopping server` matches nothing.
                     let message = info_message(&line);
-                    if message.starts_with("Done (") {
+                    if message == "Horizon management control ready" {
                         let up = {
                             let mut state = shared.state.lock().unwrap();
                             let starting = state.phase == Phase::Starting;

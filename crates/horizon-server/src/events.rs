@@ -270,7 +270,19 @@ mod tests {
     }
 
     fn accept_control_client(listener: &TcpListener) -> (BufReader<TcpStream>, TcpStream) {
-        let (stream, _) = listener.accept().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (stream, _) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("timed out accepting control client: {error}"),
+            }
+        };
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut auth = String::new();
         reader.read_line(&mut auth).unwrap();
@@ -313,6 +325,7 @@ mod tests {
         ));
         std::fs::create_dir(&temp).unwrap();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
         let path = horizon_server_launch::control_path(&temp);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(

@@ -539,13 +539,18 @@ impl Shared {
             }
         };
         if let Some(game) = game.as_mut() {
-            let saved = game.ask("console save-off").and_then(|_| {
-                // A big world's flush can take longer than an ordinary reply.
-                game.set_reply_timeout(FLUSH_TIMEOUT)?;
-                let flushed = game.ask("console save-all flush");
-                let _ = game.set_reply_timeout(engine::REPLY_TIMEOUT);
-                flushed
-            });
+            let saved = game
+                .ask("console save-off")
+                .and_then(reject_control_error)
+                .and_then(|_| {
+                    // A big world's flush can take longer than an ordinary reply.
+                    game.set_reply_timeout(FLUSH_TIMEOUT)?;
+                    let flushed = game
+                        .ask("console save-all flush")
+                        .and_then(reject_control_error);
+                    let _ = game.set_reply_timeout(engine::REPLY_TIMEOUT);
+                    flushed
+                });
             if let Err(e) = saved {
                 // Saving may be off already (a save-off whose reply was lost counts): it goes back
                 // on, or the game would run without autosaving until the next backup.
@@ -559,6 +564,18 @@ impl Shared {
         }
         result
     }
+}
+
+/// A JSON error is a reply, but it does not mean the requested save command ran.
+fn reject_control_error(reply: Value) -> std::io::Result<Value> {
+    if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
+        let message = error
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| error.to_string());
+        return Err(std::io::Error::other(message));
+    }
+    Ok(reply)
 }
 
 /// How long a backup waits for the game's `save-all flush`.
@@ -1450,6 +1467,86 @@ mod tests {
             "saving goes back on, over a connection of its own"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_backup_rejects_control_errors_while_startup_is_finishing() {
+        for (case, failed_command, expected_commands) in [
+            (
+                "save-off",
+                "console save-off",
+                vec!["console save-off", "console save-on"],
+            ),
+            (
+                "flush",
+                "console save-all flush",
+                vec![
+                    "console save-off",
+                    "console save-all flush",
+                    "console save-on",
+                ],
+            ),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "horizon-server-backup-startup-error-{}-{case}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join(".horizon")).unwrap();
+            std::fs::write(dir.join(crate::config::FILE), crate::config::TEMPLATE).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::fs::write(
+                horizon_server_launch::control_path(&dir),
+                json!({"port": port, "token": "t"}).to_string(),
+            )
+            .unwrap();
+            let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+            let heard = asked.clone();
+            let failed_command = failed_command.to_owned();
+            let server = std::thread::spawn(move || {
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().unwrap();
+                    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                    let mut writer = stream;
+                    let mut line = String::new();
+                    while std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) > 0 {
+                        let request = line.trim().to_owned();
+                        line.clear();
+                        heard.lock().unwrap().push(request.clone());
+                        let rejected = request == failed_command;
+                        let reply = if rejected {
+                            b"{\"error\":\"the dedicated server is still starting\"}\n".as_slice()
+                        } else {
+                            b"{\"ok\":true}\n".as_slice()
+                        };
+                        std::io::Write::write_all(&mut writer, reply).unwrap();
+                        if rejected {
+                            break;
+                        }
+                        if request == "console save-on" {
+                            return;
+                        }
+                    }
+                }
+            });
+
+            let shared = Shared::new(&dir);
+            shared.set_phase(Phase::Running);
+            let error = shared.back_up("test.zip").unwrap_err();
+            assert!(error.contains("didn't save"), "{error}");
+            server.join().unwrap();
+            let requests = asked.lock().unwrap().clone();
+            let commands: Vec<&str> = requests
+                .iter()
+                .filter(|request| !request.starts_with("auth "))
+                .map(String::as_str)
+                .collect();
+            assert_eq!(commands, expected_commands, "{case}");
+            assert!(backup::list(&dir).is_empty(), "{case} made a backup");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

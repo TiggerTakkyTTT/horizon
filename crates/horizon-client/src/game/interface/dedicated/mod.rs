@@ -1592,6 +1592,9 @@ impl Game<'_> {
         // is complete; the first tick can then take over the same endpoint.
         if let Some(startup) = startup_control {
             self.control = startup.finish(false);
+            if self.control.is_some() {
+                log("INFO", "Horizon management control ready");
+            }
         }
         let mut next = Instant::now();
         // The panic that ended the tick loop, when one did.
@@ -2877,10 +2880,13 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    /// Run a failed upgrade after the supervisor's last startup poll and keep the real control
-    /// endpoint alive through the shutdown handoff so the management poll can fetch its event.
+    /// Run a failed upgrade after the supervisor's last startup poll and exercise the real drop
+    /// path while management fetches its final event.
     #[test]
     fn upgrade_world_failure_is_served_during_startup_shutdown_handoff() {
+        let _event_serial = super::events::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("control.sock");
         let server = super::control::Server::start(&path).unwrap();
@@ -2931,7 +2937,7 @@ mod tests {
             )
             .is_err()
         );
-        let finishing = std::thread::spawn(move || startup.finish(true));
+        let finishing = std::thread::spawn(move || drop(startup));
 
         line.clear();
         writeln!(client, "{request}").unwrap();
@@ -2949,14 +2955,9 @@ mod tests {
             "late failure event missing from {during_shutdown}"
         );
 
-        let returned = finishing.join().unwrap();
-        assert!(
-            returned.is_some(),
-            "startup control server was not returned"
-        );
+        finishing.join().unwrap();
         drop(reader);
         drop(client);
-        drop(returned);
     }
 
     /// `/restart` without `horizon-server` refuses and stops nothing; with it, it asks the server loop to end.
