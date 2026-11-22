@@ -1470,7 +1470,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "daily"]
     fn a_backup_rejects_control_errors_while_startup_is_finishing() {
         for (case, failed_command, expected_commands) in [
             (
