@@ -543,7 +543,12 @@ impl Game<'_> {
             &self.pack.additional_data,
         ));
         self.world_biomes_base = self.world_biomes.clone();
-        let (res, pack, settings) = (self.res.clone(), self.pack.clone(), self.settings.clone());
+        let (res, pack, settings, command_harness_scheduled_tick_range) = (
+            self.res.clone(),
+            self.pack.clone(),
+            self.settings.clone(),
+            self.command_harness_scheduled_tick_range,
+        );
         horizon_client::parallel::set_setting(settings.horizon.parallel_tick);
         let flags = Arc::new(Flags::default());
         flags
@@ -571,6 +576,7 @@ impl Game<'_> {
                 options,
                 settings,
                 launch,
+                command_harness_scheduled_tick_range,
                 server_flags.clone(),
                 server_tasks,
                 &ready_tx,
@@ -1386,6 +1392,7 @@ fn serve(
     options: Options,
     settings: Settings,
     launch: Launch,
+    command_harness_scheduled_tick_range: bool,
     flags: Arc<Flags>,
     tasks: Receiver<Task>,
     ready: &Sender<Ready>,
@@ -1430,6 +1437,9 @@ fn serve(
             return Err(e);
         }
     };
+    // The command-parity radius is set on the window Game before integrated startup, but the
+    // server has its own Game on this thread. Carry the test-only scheduled-tick bound across.
+    server.command_harness_scheduled_tick_range = command_harness_scheduled_tick_range;
     server.run_integrated(launch, flags, tasks, ready, opening)
 }
 
