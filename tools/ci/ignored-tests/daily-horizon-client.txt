@@ -250,3 +250,4 @@ horizon-client game::wind::wind_charged_tests::a_mobs_burst_leaves_vehicles_alon
 horizon-client game::wind::wind_charged_tests::a_silent_wind_charge_bursts_without_a_sound lib daily game-boot
 horizon-client game::wind::wind_charged_tests::a_wind_charged_mob_bursts_with_the_breezes_sound_unless_it_is_silent lib daily game-boot
 horizon-client game::wither_star_tests::a_withers_nether_star_lives_12000_ticks lib daily game-boot
+horizon-client-lib mod_content::tests::declared_growing_plant_family_reaches_world_behaviours lib daily resources

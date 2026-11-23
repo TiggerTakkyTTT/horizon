@@ -3348,6 +3348,106 @@ capabilities = ["registries"]
         assert_eq!(content.blocks.len(), 2);
     }
 
+    #[test]
+    fn growing_plant_families_validate_their_head_and_body_pair() {
+        let family = |head: &str, body: &str| GrowingPlant {
+            head: head.into(),
+            body: body.into(),
+            direction: GrowingPlantDirection::Down,
+            kelp: false,
+        };
+        let block = |id: &str, template: &str, growing_plant: Option<GrowingPlant>| Block {
+            id: id.into(),
+            template: template.into(),
+            growing_plant,
+            ..Block::default()
+        };
+        const VALID_HEAD: &[u8] = br#"{"template":"minecraft:weeping_vines","growing_plant":{"head":"ruby:head","body":"ruby:body","direction":"down"}}"#;
+        const MISSING_BODY_HEAD: &[u8] = br#"{"template":"minecraft:weeping_vines","growing_plant":{"head":"ruby:head","body":"ruby:missing","direction":"down"}}"#;
+        const VALID_BODY: &[u8] = br#"{"template":"minecraft:weeping_vines_plant"}"#;
+        const WRONG_BODY: &[u8] = br#"{"template":"minecraft:twisting_vines_plant"}"#;
+        let load = |name: &str, head: &[u8], body: Option<&[u8]>| {
+            let mut files = vec![("data/ruby/horizon/block/head.json", head)];
+            if let Some(body) = body {
+                files.push(("data/ruby/horizon/block/body.json", body));
+            }
+            hmod(name, MANIFEST_TEXT, &files)
+        };
+
+        for (invalid, message) in [
+            (
+                block(
+                    "ruby:body",
+                    "minecraft:weeping_vines_plant",
+                    Some(family("ruby:head", "ruby:body")),
+                ),
+                "declared on its head",
+            ),
+            (
+                block(
+                    "ruby:plant",
+                    "minecraft:weeping_vines",
+                    Some(family("ruby:plant", "ruby:plant")),
+                ),
+                "must be different blocks",
+            ),
+            (
+                block(
+                    "ruby:plant",
+                    "minecraft:stone",
+                    Some(family("ruby:plant", "ruby:body")),
+                ),
+                "vanilla growing-plant head template",
+            ),
+        ] {
+            assert!(check_block(&invalid).unwrap_err().contains(message));
+        }
+
+        let head = block(
+            "ruby:head",
+            "minecraft:weeping_vines",
+            Some(family("ruby:head", "ruby:body")),
+        );
+        let body = block("ruby:body", "minecraft:weeping_vines_plant", None);
+        let mut content = Content::declared("ruby");
+        content.declare(&[head, body.clone()], &[]).unwrap();
+
+        let duplicate_head = block(
+            "ruby:other_head",
+            "minecraft:twisting_vines",
+            Some(family("ruby:other_head", "ruby:body")),
+        );
+        let error = content
+            .declare(std::slice::from_ref(&duplicate_head), &[])
+            .unwrap_err();
+        assert!(error.contains("already assigned to ruby:head"), "{error}");
+        assert_eq!(content.blocks.len(), 2, "a rejected family is not declared");
+
+        let loaded = load("growing-plant", VALID_HEAD, Some(VALID_BODY)).unwrap();
+        let loaded_head = loaded
+            .blocks
+            .iter()
+            .find(|block| block.id == "ruby:head")
+            .unwrap();
+        assert_eq!(
+            loaded_head.growing_plant.as_ref().unwrap().body,
+            "ruby:body"
+        );
+
+        let missing_body = load("growing-plant-missing-body", MISSING_BODY_HEAD, None).unwrap_err();
+        assert!(
+            missing_body.contains("body ruby:missing is not declared"),
+            "{missing_body}"
+        );
+
+        let wrong_body_template =
+            load("growing-plant-wrong-body", VALID_HEAD, Some(WRONG_BODY)).unwrap_err();
+        assert!(
+            wrong_body_template.contains("must use template minecraft:weeping_vines_plant"),
+            "{wrong_body_template}"
+        );
+    }
+
     /// A creative tab: a title, an icon and its items, all item ids.
     #[test]
     fn world_fluid_generated_names_cannot_collide() {
