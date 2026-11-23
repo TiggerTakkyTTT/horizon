@@ -6003,18 +6003,24 @@ impl Game<'_> {
                     if owner_dim != self.dim {
                         if can_take && !cancel {
                             self.spawn_pearl_endermite(from);
-                            // `ThrownEnderpearl.onHit` resets its owner's portal
-                            // cooldown too. The queued cross-level path needs to
-                            // carry that reset in the host's player state.
                             let conn = conn.expect("cross-level player owner has a connection");
-                            self.lan
-                                .as_mut()
-                                .expect("cross-level pearl owner requires a server")
-                                .play
-                                .entry(conn)
-                                .or_default()
-                                .portal
-                                .cooldown = horizon_client::nether_portal::ENTITY_DELAY;
+                            // Vanilla resets the owner's cooldown only when the
+                            // pearl itself arrived with a portal cooldown.
+                            if self
+                                .portals
+                                .entities
+                                .get(&p.id)
+                                .is_some_and(|state| state.cooldown > 0)
+                            {
+                                self.lan
+                                    .as_mut()
+                                    .expect("cross-level pearl owner requires a server")
+                                    .play
+                                    .entry(conn)
+                                    .or_default()
+                                    .portal
+                                    .cooldown = horizon_client::nether_portal::ENTITY_DELAY;
+                            }
                             self.level_teleports
                                 .push(crate::game::server_travel::LevelTeleport {
                                     conn,
@@ -9778,6 +9784,14 @@ mod tests {
         let mut host = game.lan.take().unwrap();
         host.hub.guests.push(guest);
         game.lan = Some(host);
+        game.lan
+            .as_mut()
+            .unwrap()
+            .play
+            .entry(2)
+            .or_default()
+            .portal
+            .cooldown = 17;
 
         let target = Vec3::new(12.5, 75.0, -3.5);
         let mut pearl = Projectile::new(ProjectileKind::EnderPearl, target, Some(Who::Player));
@@ -9793,6 +9807,11 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(
+            game.lan.as_ref().unwrap().play[&2].portal.cooldown,
+            17,
+            "a pearl without portal cooldown must not reset its owner's cooldown"
+        );
         assert_eq!(game.level_teleports.len(), 1);
         assert_eq!(
             game.level_teleports[0].damage,
@@ -10042,6 +10061,14 @@ mod tests {
         guest.loaded = true;
         let uuid = horizon_client::lan::playerdata::uuid_ints(guest.uuid);
         game.lan.as_mut().unwrap().hub.guests.push(guest);
+        game.lan
+            .as_mut()
+            .unwrap()
+            .play
+            .entry(2)
+            .or_default()
+            .portal
+            .cooldown = 17;
 
         // Tick the pearl through a real portal handoff, not directly into the hit handler.
         game.enter_level(super::super::Dim::Nether).unwrap();
@@ -10097,6 +10124,13 @@ mod tests {
             .expect("the pearl should land in the overworld");
         assert_eq!(pearl.owner, Some(Who::Player));
         assert_eq!(pearl.guest, Some(2));
+        assert!(
+            game.portals
+                .entities
+                .get(&pearl.id)
+                .is_some_and(|state| state.cooldown > 0),
+            "a pearl that crossed a portal must retain its portal cooldown"
+        );
         let target = pearl.position;
         pearl.previous = target;
         game.projectile_hit(
@@ -10108,6 +10142,11 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(
+            game.lan.as_ref().unwrap().play[&2].portal.cooldown,
+            horizon_client::nether_portal::ENTITY_DELAY,
+            "a pearl with portal cooldown resets its owner's cooldown"
+        );
         assert_eq!(game.level_teleports.len(), 1);
         assert_eq!(
             game.level_teleports[0].damage,
