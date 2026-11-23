@@ -12,12 +12,17 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 
-use model_reducing::reducible_model_sprites;
+pub use model_reducing::set_mod_namespaces;
+use model_reducing::{full_size_sprites, mod_namespaces, reducible_model_sprites};
 
 mod animate;
+#[cfg(test)]
+mod atlas_32x_tests;
 pub mod cit_glint;
 mod clip_corner;
 mod gui_sprite;
+#[cfg(test)]
+mod material_name_tests;
 mod menu_pictures;
 mod model_reducing;
 mod pack_text;
@@ -112,6 +117,9 @@ pub struct HudAtlas {
     /// The packs' `core/sky` and `core/stars`, when a pack replaces them.
     pub sky_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
     pub stars_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    /// The packs' `core/position_tex_color` (`RenderPipelines.GUI_TEXTURED`), when a pack
+    /// replaces it: [`HudBatch::pack_blit`] draws the menu textures with it.
+    pub blit_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
     /// The packs' Polytone screen sprite modifiers.
     pub sprite_modifiers: std::sync::Arc<sprite_modifiers::SpriteModifiers>,
     /// The packs' OptiFine random entity textures, whose variants this atlas packs.
@@ -289,14 +297,10 @@ pub fn decode_image_bytes(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
 
 /// A PNG in memory as RGBA pixels.
 pub fn decode_bytes(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
-    decoder.ignore_checksums(true);
-    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info()?;
-    let mut bytes = vec![0; reader.output_buffer_size().ok_or("image too large")?];
+    let (mut reader, mut bytes) = read_png(data)?;
     let info = reader.next_frame(&mut bytes)?;
     let channels = info.color_type.samples();
-    let mut rgba = Vec::with_capacity((info.width * info.height * 4) as usize);
+    let mut rgba = Vec::with_capacity(info.width as usize * info.height as usize * 4);
     for p in bytes[..info.buffer_size()].chunks_exact(channels) {
         rgba.extend(match channels {
             4 => [p[0], p[1], p[2], p[3]],
@@ -307,20 +311,24 @@ pub fn decode_bytes(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
     }
     Ok((info.width, info.height, rgba))
 }
-/// The most texels of OptiFine random entity variants the entity atlas packs: 2048 rows of
-/// its 4096, which keeps the default atlas (4096x5120) under the 8192 rows many GPUs take.
+/// The most texels of OptiFine random entity variants and custom entity models' textures the
+/// entity atlas packs: 2048 rows of its 4096, which keeps the default atlas (4096x5120) under
+/// the 8192 rows many GPUs take.
 const RANDOM_TEXELS: u64 = 4096 * 2048;
-/// The variant images (and `overlays`) the atlas packs: every variant before any overlay, by
-/// name, while their sizes add up to at most `budget` texels. A full budget drops glows before
-/// looks.
+/// The images beside the textures the atlas walks (random variants, custom entity models'
+/// textures) and their `overlays` the atlas packs: random variants first, then the custom
+/// entity models' textures (`cem`), then every overlay, by name within each, while their sizes
+/// add up to at most `budget` texels. A full budget drops glows before looks, and a model's
+/// texture before a variant that already drew.
 fn budgeted<'a>(
     source: &ResourceSource,
     files: impl Iterator<Item = &'a String>,
     overlays: &HashSet<String>,
+    cem: &HashSet<String>,
     budget: u64,
 ) -> HashSet<String> {
     let mut files: Vec<&String> = files.collect();
-    files.sort_by_key(|p| (overlays.contains(*p), *p));
+    files.sort_by_key(|p| (overlays.contains(*p), cem.contains(*p), *p));
     within_budget(source, &files, budget)
 }
 /// The `files` (in order) whose sizes add up to at most `budget` texels.
@@ -346,6 +354,92 @@ pub fn png_bytes_size(data: &[u8]) -> Option<(u32, u32)> {
     let field = |at: usize| u32::from_be_bytes(header[at..at + 4].try_into().unwrap_or_default());
     Some((field(16), field(20)))
 }
+/// A pack PNG's reader, set to give 8-bit samples, and the zeroed buffer its `next_frame` fills;
+/// an error when the header claims more pixels than any texture it could fill. The PNG reader
+/// trusts the header and leaves this buffer to its caller, so a pack file of a few dozen bytes
+/// could otherwise ask for gigabytes and end the game. The header is checked before `read_info`,
+/// whose own row-size arithmetic trusts it too. Only the pixel count is bounded, by a full
+/// [`MAX_ATLAS_SIZE`] atlas (1 GiB of RGBA): a sheet may be far longer than any texture side
+/// (an animation strip of small frames), so sides are checked on what is cut from it.
+pub(crate) fn read_png<B: AsRef<[u8]>>(
+    bytes: B,
+) -> std::result::Result<(png::Reader<std::io::Cursor<B>>, Vec<u8>), String> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    // As stb_image, which never checks chunk CRCs: packs ship PNGs with wrong ones.
+    decoder.ignore_checksums(true);
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let (width, height) = decoder
+        .read_header_info()
+        .map_err(|e| e.to_string())?
+        .size();
+    check_png_size(width, height)?;
+    let reader = decoder.read_info().map_err(|e| e.to_string())?;
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| format!("a {width}x{height} PNG exceeds the decoder's limits"))?;
+    Ok((reader, vec![0; size]))
+}
+fn check_png_size(width: u32, height: u32) -> std::result::Result<(), String> {
+    let atlas = u64::from(MAX_ATLAS_SIZE);
+    if u64::from(width) * u64::from(height) > atlas * atlas {
+        return Err(format!(
+            "a {width}x{height} PNG is larger than any texture it could fill"
+        ));
+    }
+    Ok(())
+}
+/// A PNG whose header claims `width` x `height` RGBA pixels and whose image data is empty: a
+/// few dozen bytes that ask a decoder to reserve memory for every claimed pixel.
+#[cfg(test)]
+pub(crate) fn claimed_size_png(width: u32, height: u32) -> Vec<u8> {
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+        png.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+        let start = png.len();
+        png.extend_from_slice(kind);
+        png.extend_from_slice(data);
+        let crc = crc32(&png[start..]);
+        png.extend_from_slice(&crc.to_be_bytes());
+    };
+    let mut ihdr = [0; 13];
+    ihdr[..4].copy_from_slice(&width.to_be_bytes());
+    ihdr[4..8].copy_from_slice(&height.to_be_bytes());
+    // 8 bits a channel, RGBA, no interlace.
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    chunk(b"IHDR", &ihdr);
+    // An empty zlib stream.
+    chunk(b"IDAT", &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    chunk(b"IEND", &[]);
+    png
+}
+/// A real `width` x `height` RGBA PNG, every pixel opaque grey.
+#[cfg(test)]
+pub(crate) fn grey_png(width: u32, height: u32) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    let mut encoder = png::Encoder::new(&mut encoded, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    let pixels = [128, 128, 128, 255].repeat(width as usize * height as usize);
+    writer.write_image_data(&pixels).unwrap();
+    writer.finish().unwrap();
+    encoded
+}
 /// A PNG's width and height, from its header alone.
 fn png_size(source: &ResourceSource, path: &str) -> Option<(u32, u32)> {
     png_bytes_size(&source.read_head(path, 24).ok()?)
@@ -368,7 +462,7 @@ type PackedImage = (String, u32, u32, Vec<u8>);
 /// for the world's sprite arrays.
 fn strip_frame(pixels: &[u8], stride: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
     let side = w.max(h);
-    let mut out = Vec::with_capacity((side * side * 4) as usize);
+    let mut out = Vec::with_capacity(side as usize * side as usize * 4);
     for row in 0..side {
         let source_row = y + row * h / side;
         for column in 0..side {
@@ -394,8 +488,15 @@ fn first_frame(
         meta.frame_size(w as i32, h as i32)
     });
     match (u32::try_from(fw), u32::try_from(fh)) {
+        // A frame whose square no atlas holds keeps the whole image, as frame metadata that
+        // doesn't fit does, rather than ask for gigabytes.
         (Ok(fw), Ok(fh))
-            if fw > 0 && fh > 0 && w % fw == 0 && h % fh == 0 && (fw, fh) != (w, h) =>
+            if fw > 0
+                && fh > 0
+                && w % fw == 0
+                && h % fh == 0
+                && (fw, fh) != (w, h)
+                && crate::sprites::check_frames(fw.max(fh), 1).is_ok() =>
         {
             let side = fw.max(fh);
             (side, side, strip_frame(&pixels, w, 0, 0, fw, fh))
@@ -650,16 +751,18 @@ fn atlas_sprites(root: &ResourceSource, packed: &[PackedImage]) -> (Vec<PackedIm
                 SpriteOrigin::File(texture) => {
                     // Its path under `textures/` in any namespace (a server
                     // pack's `lobby:item/...` as well as vanilla's).
-                    let path = texture.split_once(':').map_or(texture.as_str(), |(_, p)| p);
                     let file = atlas_sources::texture_resource(texture, "textures");
                     decode_resource(root, &file).ok().map(|image| {
                         // Animated strips keep their first frame and animate, like the
                         // packed files, under any folder: vanilla animates every sprite of
                         // these atlases (a server pack's `wynn/...` as well as `item/...`).
+                        // A still texture is the whole image (`SpriteResourceLoader`: the frame
+                        // size is the image's without an animation section), so a 64x32 item
+                        // texture keeps its right half.
                         let mcmeta = root.read_to_string(&format!("{file}.mcmeta")).ok();
                         let animation = animation_of(mcmeta.as_deref());
                         animated = animation.is_some();
-                        if animated || path.starts_with("block/") || path.starts_with("item/") {
+                        if animated {
                             first_frame(image, animation.as_ref())
                         } else {
                             image
@@ -702,7 +805,7 @@ fn galactic_widths(
     let Some(sheet) = sprites.get("font/ascii_sga") else {
         return widths;
     };
-    let cell = sheet.w / 16;
+    let cell = sheet.texels((width, height)).0 / 16;
     let (px, py) = (
         (sheet.u0 * width as f32) as u32,
         (sheet.v0 * height as f32) as u32,
@@ -766,6 +869,19 @@ pub fn dump_atlas(
     }
     fs::write(dir.join(format!("{name}.txt")), list)?;
     Ok(png_path)
+}
+
+/// Whether `name` (`gui/icon_n`) is a LabPBR map of a texture beside it (`gui/icon`) that is
+/// read as one (`read_maps`): the world's sprites own it, so the atlas does not draw it again.
+/// With the maps not read it is an ordinary image like any other.
+fn is_companion_map(root: &ResourceSource, name: &str, read_maps: bool) -> bool {
+    read_maps
+        && name
+            .strip_suffix("_n")
+            .or_else(|| name.strip_suffix("_s"))
+            .is_some_and(|base| {
+                root.contains(&crate::atlas_sources::texture_resource(base, "textures"))
+            })
 }
 
 impl HudAtlas {
@@ -968,6 +1084,7 @@ impl HudAtlas {
             lines_shader: None,
             sky_shader: None,
             stars_shader: None,
+            blit_shader: None,
             sprite_modifiers: Default::default(),
             random_textures: Default::default(),
             emissive: Arc::default(),
@@ -1037,6 +1154,7 @@ impl HudAtlas {
             lines_shader: None,
             sky_shader: None,
             stars_shader: None,
+            blit_shader: None,
             sprite_modifiers: Default::default(),
             random_textures: Default::default(),
             emissive: Default::default(),
@@ -1145,8 +1263,8 @@ impl HudAtlas {
             }
         }
         files.retain(|p| !menu_pictures::menu_picture_only(p));
-        // OptiFine random entity variants, under the names their scan gives them (those
-        // outside `textures/` are `<ns>:optifine/random/...`).
+        // OptiFine random entity variants and custom entity models' textures, under the names
+        // their scans give them (those outside `textures/` are `<ns>:optifine/...`).
         let random_textures = if folders.contains(&"entity") {
             horizon_optifine::random_textures::RandomTextures::scan(root)
         } else {
@@ -1172,20 +1290,29 @@ impl HudAtlas {
         for (file, name) in extra {
             named.insert(file.to_owned(), name.to_owned());
         }
+        // The PNGs beside a `.jem` under `optifine/cem/` or `emf/cem/`: no `textures/` walk
+        // reaches them, and a model's own texture is one the atlas has to pack.
+        let mut cem_textures: HashSet<String> = HashSet::new();
+        if folders.contains(&"entity") {
+            let textures = horizon_optifine::cem::files::texture_files(root);
+            cem_textures = textures.iter().map(|(path, _)| path.clone()).collect();
+            named.extend(textures);
+        }
         if !named.is_empty() {
-            // A pack's variants can't grow the shared atlas past what a GPU takes: every variant
-            // (those beside their texture too) counts, in name order, and those past the budget
-            // stay out (their mobs wear the texture itself), not the whole pack.
-            // Overlays and blink frames only after every variant.
+            // A pack's variants and model textures can't grow the shared atlas past what a GPU
+            // takes: every one (those beside their texture too) counts, the random variants
+            // before the model textures and both before overlays and blink frames, by name
+            // within each; those past the budget stay out (their mobs wear the texture itself),
+            // not the whole pack.
             let overlays: HashSet<String> = emissive
                 .files()
                 .chain(blinks.files())
                 .map(|(f, _)| f.to_owned())
                 .collect();
-            let kept = budgeted(root, named.keys(), &overlays, RANDOM_TEXELS);
+            let kept = budgeted(root, named.keys(), &overlays, &cem_textures, RANDOM_TEXELS);
             if kept.len() < named.len() {
                 log::warn!(
-                    "{} random entity textures left out of the atlas: past its budget",
+                    "{} entity textures left out of the atlas: past its budget",
                     named.len() - kept.len()
                 );
             }
@@ -1241,9 +1368,8 @@ impl HudAtlas {
                 }
             };
             // LabPBR's maps beside a texture are the world's (sprites.rs), not images to draw.
-            if let Some(base) = name.strip_suffix("_n").or_else(|| name.strip_suffix("_s"))
-                && root.contains(&crate::atlas_sources::texture_resource(base, "textures"))
-            {
+            // Only while they are read: otherwise the names are ordinary images.
+            if is_companion_map(root, &name, read_maps) {
                 return None;
             }
             // A texture the pack cannot decode keeps the default it shadows: the
@@ -1277,9 +1403,9 @@ impl HudAtlas {
             };
             let mcmeta = source.read_to_string(&format!("{path}.mcmeta")).ok();
             let animation = animation_of(mcmeta.as_deref());
-            // An animated strip keeps its first frame.
-            let frames =
-                animation.is_some() || name.starts_with("block/") || name.starts_with("item/");
+            // An animated strip keeps its first frame; a still texture is the whole image
+            // (`SpriteResourceLoader`), whatever its folder or shape.
+            let frames = animation.is_some();
             let (w, h, pixels) = if frames {
                 first_frame(image, animation.as_ref())
             } else {
@@ -1287,9 +1413,17 @@ impl HudAtlas {
             };
             // The default texture's size, when a pack's differs from it. A sprite
             // that fell back to the default is at that size already: the broken
-            // file's header must not give it another one.
+            // file's header must not give it another one. Read the layer the
+            // pack resolved over (`shadow`, as the decode fallback does): the
+            // callers pass the resolved overlay itself as `defaults`, so
+            // `defaults` would answer a replaced texture with the pack's own
+            // file and a hi-res pack would draw its pixel size everywhere.
             let gui_size = png_size(
-                if defaulted { source } else { defaults },
+                if defaulted {
+                    source
+                } else {
+                    shadow.unwrap_or(defaults)
+                },
                 &crate::atlas_sources::texture_resource(&name, "textures"),
             )
             .map(|(dw, dh)| {
@@ -1365,6 +1499,23 @@ impl HudAtlas {
             let (more, more_animated) = atlas_sprites(root, &images);
             images.extend(more);
             animated.extend(more_animated);
+            // A generated sprite keeps the generation the pack resolved over as
+            // its logical size, as a walked file's gui_size does: the pack's
+            // own hi-res source (a paletted permutation's palette, a renamed
+            // texture) is no logical size. The defaults' own generation names
+            // every sprite they generate; a sprite only the pack generates
+            // keeps its own size.
+            let generation = if defaults.same_generation(root) {
+                root.underlay()
+            } else {
+                Some(defaults)
+            };
+            if let Some(generation) = generation {
+                let (default_generated, _) = atlas_sprites(generation, &[]);
+                for (name, w, h, _) in default_generated {
+                    gui_sizes.entry(name).or_insert((w, h));
+                }
+            }
             for (image, image_flags, is_animated) in cit_sprites(root, &images) {
                 cit_names.insert(image.0.clone());
                 if let Some(f) = image_flags {
@@ -1435,12 +1586,44 @@ impl HudAtlas {
             Self::layout_leaving_out(&mut images, &mut animated, &cit_names, MAX_ATLAS_SIZE)
                 .or_else(|error| -> Result<_> {
                     let models = reducible_model_sprites(root, &images, &bordered);
-                    let layout = Self::layout_reducing_models(
+                    let reduced = Self::layout_reducing_models(
                         &mut images,
                         &mut gui_sizes,
                         &models,
                         MAX_ATLAS_SIZE,
-                    )?;
+                    );
+                    let layout = match reduced {
+                        Ok(layout) => layout,
+                        Err(_) => {
+                            let keep = full_size_sprites(root, &images, &bordered);
+                            let capped = Self::layout_capping_mod_textures(
+                                &mut images,
+                                &mut gui_sizes,
+                                &keep,
+                                &mod_namespaces(),
+                                MAX_ATLAS_SIZE,
+                            );
+                            match capped {
+                                Ok(layout) => {
+                                    log::warn!(
+                                        "reduced the resolution of mods' HUD textures to keep the resource packs: {error}"
+                                    );
+                                    return Ok(layout);
+                                }
+                                Err(_) => {
+                                    let layout = Self::layout_reducing_hires(
+                                        &mut images,
+                                        &gui_sizes,
+                                        MAX_ATLAS_SIZE,
+                                    )?;
+                                    log::warn!(
+                                        "reduced the pack's high-resolution sprites toward their logical sizes to keep the resource pack: {error}"
+                                    );
+                                    return Ok(layout);
+                                }
+                            }
+                        }
+                    };
                     log::warn!(
                         "reduced HUD model texture resolution to keep the resource pack: {error}"
                     );
@@ -1470,6 +1653,8 @@ impl HudAtlas {
             }
             let b = u32::from(bordered.contains(name));
             let (px, py, w, h) = (px + b, py + b, w - 2 * b, h - 2 * b);
+            // A sprite's logical size is its rect's: the region the UVs cover,
+            // past the wrapped border, whatever the default named.
             let (gw, gh) = gui_sizes.get(name).copied().unwrap_or((w, h));
             sprites.insert(
                 name.clone(),
@@ -1573,6 +1758,7 @@ impl HudAtlas {
             lines_shader: None,
             sky_shader: None,
             stars_shader: None,
+            blit_shader: None,
             sprite_modifiers: Default::default(),
             random_textures,
             emissive,
@@ -1707,6 +1893,13 @@ pub enum Blend {
     /// An OptiFine CIT glint layer (`cit_glint`), blended as entry `n` of
     /// `GlintTextures::blends` says.
     CitGlint(u8),
+    /// `GuiGraphicsExtractor.blit(GUI_TEXTURED, texture, ...)` as vanilla draws it: one quad
+    /// with the blit's own UVs, which the pack's `position_tex_color` draws with picture `id`
+    /// as `Sampler0` ([`HudBatch::pack_blit`]).
+    PackBlit(u64),
+    /// The same blit as the atlas tiles it draws natively, translucent: drawn unless the pack's
+    /// shader draws the `PackBlit` of picture `id` after it.
+    PackBlitNative(u64),
 }
 /// What a `Blend::EndPortal` fill samples: the atlas rects (u0, v0, width,
 /// height) of `end_sky.png` and `end_portal.png`, and the `GameTime` uniform.
@@ -1718,6 +1911,82 @@ pub struct EndPortalFill {
 pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     (a as u32) << 24 | (b as u32) << 16 | (g as u32) << 8 | r as u32
 }
+/// What [`HudBatch::clip_since`] keeps of quad `q` inside `x0, y0, x1, y1`, appended to `out`.
+fn clip_quad(q: [HudVertex; 6], [x0, y0, x1, y1]: [f32; 4], out: &mut Vec<HudVertex>) {
+    // A quad wholly inside keeps all of itself. One wholly outside keeps nothing. Only a quad
+    // across an edge is cut below.
+    let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
+    for v in &q {
+        for axis in 0..2 {
+            lo[axis] = lo[axis].min(v.pos[axis]);
+            hi[axis] = hi[axis].max(v.pos[axis]);
+        }
+    }
+    if lo[0] >= x0 && hi[0] <= x1 && lo[1] >= y0 && hi[1] <= y1 {
+        out.extend_from_slice(&q);
+        return;
+    }
+    if hi[0] <= x0 || lo[0] >= x1 || hi[1] <= y0 || lo[1] >= y1 {
+        return;
+    }
+    let corners = [q[0], q[1], q[2], q[5]];
+    let (mut x_lo, mut x_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    let (mut y_lo, mut y_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for v in &corners {
+        x_lo = x_lo.min(v.pos[0]);
+        x_hi = x_hi.max(v.pos[0]);
+        y_lo = y_lo.min(v.pos[1]);
+        y_hi = y_hi.max(v.pos[1]);
+    }
+    let find = |x: f32, y: f32| corners.iter().find(|v| v.pos == [x, y]).copied();
+    let rect = (
+        find(x_lo, y_lo),
+        find(x_hi, y_lo),
+        find(x_hi, y_hi),
+        find(x_lo, y_hi),
+    );
+    let (Some(tl), Some(tr), Some(br), Some(bl)) = rect else {
+        for tri in [[q[0], q[1], q[2]], [q[3], q[4], q[5]]] {
+            let area = (tri[1].pos[0] - tri[0].pos[0]) * (tri[2].pos[1] - tri[0].pos[1])
+                - (tri[2].pos[0] - tri[0].pos[0]) * (tri[1].pos[1] - tri[0].pos[1]);
+            if area == 0.0 {
+                continue;
+            }
+            let mut poly = tri.to_vec();
+            for (axis, limit, keep_below) in
+                [(0, x0, false), (0, x1, true), (1, y0, false), (1, y1, true)]
+            {
+                poly = clip_polygon(&poly, axis, limit, keep_below);
+            }
+            for i in 1..poly.len().saturating_sub(1) {
+                let (a, b, c) = (poly[0], poly[i], poly[i + 1]);
+                out.extend_from_slice(&[a, b, c, a, c, c]);
+            }
+        }
+        return;
+    };
+    let (cx0, cy0) = (x_lo.max(x0), y_lo.max(y0));
+    let (cx1, cy1) = (x_hi.min(x1), y_hi.min(y1));
+    if cx0 >= cx1 || cy0 >= cy1 {
+        return;
+    }
+    let t = |p: f32, lo: f32, hi: f32| if hi == lo { 0.0 } else { (p - lo) / (hi - lo) };
+    let corner = |x, y| {
+        clip_corner::clip_corner(
+            [tl, tr, br, bl],
+            [x, y],
+            [t(x, x_lo, x_hi), t(y, y_lo, y_hi)],
+        )
+    };
+    let c = [
+        corner(cx0, cy0),
+        corner(cx1, cy0),
+        corner(cx1, cy1),
+        corner(cx0, cy1),
+    ];
+    out.extend([0, 1, 2, 0, 2, 3].map(|i| c[i]));
+}
+
 impl HudBatch {
     /// Window.calculateScale: the largest scale keeping >= 320x240 GUI pixels,
     /// capped by the GUI Scale option (0 = auto).
@@ -1982,74 +2251,52 @@ impl HudBatch {
         }
     }
     pub fn clip_since(&mut self, start: usize, x0: f32, y0: f32, x1: f32, y1: f32) {
-        let quads: Vec<[HudVertex; 6]> = self.vertices[start..].as_chunks::<6>().0.to_vec();
-        self.vertices.truncate(start);
-        // Where each source quad now begins, to move the blend ranges (foil
-        // items are an additive run) along with their vertices.
-        let mut moved = Vec::with_capacity(quads.len() + 1);
-        for q in quads {
-            moved.push(self.vertices.len() as u32);
-            let corners = [q[0], q[1], q[2], q[5]];
-            let (mut x_lo, mut x_hi) = (f32::INFINITY, f32::NEG_INFINITY);
-            let (mut y_lo, mut y_hi) = (f32::INFINITY, f32::NEG_INFINITY);
-            for v in &corners {
-                x_lo = x_lo.min(v.pos[0]);
-                x_hi = x_hi.max(v.pos[0]);
-                y_lo = y_lo.min(v.pos[1]);
-                y_hi = y_hi.max(v.pos[1]);
-            }
-            // An axis-aligned rectangle, its corners in any order.
-            let find = |x: f32, y: f32| corners.iter().find(|v| v.pos == [x, y]).copied();
-            let rect = (
-                find(x_lo, y_lo),
-                find(x_hi, y_lo),
-                find(x_hi, y_hi),
-                find(x_lo, y_hi),
-            );
-            let (Some(tl), Some(tr), Some(br), Some(bl)) = rect else {
-                // Item geometry arrives as triangles: clip each against the
-                // rectangle and re-emit the fan, so a triangle straddling the
-                // edge keeps its visible part instead of vanishing whole.
-                for tri in [[q[0], q[1], q[2]], [q[3], q[4], q[5]]] {
-                    let area = (tri[1].pos[0] - tri[0].pos[0]) * (tri[2].pos[1] - tri[0].pos[1])
-                        - (tri[2].pos[0] - tri[0].pos[0]) * (tri[1].pos[1] - tri[0].pos[1]);
-                    if area == 0.0 {
-                        continue;
-                    }
-                    let mut poly = tri.to_vec();
-                    for (axis, limit, keep_below) in
-                        [(0, x0, false), (0, x1, true), (1, y0, false), (1, y1, true)]
-                    {
-                        poly = clip_polygon(&poly, axis, limit, keep_below);
-                    }
-                    for i in 1..poly.len().saturating_sub(1) {
-                        // A triangle as the quad `a, b, c, c`.
-                        let (a, b, c) = (poly[0], poly[i], poly[i + 1]);
-                        self.vertices.extend_from_slice(&[a, b, c, a, c, c]);
-                    }
+        // Cut where the quads are. The kept ones move down over what is gone, rather than taking
+        // all of them out and putting them back. Only when a cut quad grows past what is still
+        // to be read is the rest taken out and put back after it.
+        let count = (self.vertices.len() - start) / 6;
+        let mut moved = Vec::with_capacity(count + 1);
+        let mut cut = Vec::new();
+        let mut write = start;
+        let mut index = 0;
+        let mut appending = false;
+        while index < count {
+            let read = start + index * 6;
+            let q: [HudVertex; 6] = self.vertices[read..read + 6].try_into().expect("six");
+            moved.push(write as u32);
+            index += 1;
+            let inside = q
+                .iter()
+                .all(|v| v.pos[0] >= x0 && v.pos[0] <= x1 && v.pos[1] >= y0 && v.pos[1] <= y1);
+            if inside {
+                if write != read {
+                    self.vertices.copy_within(read..read + 6, write);
                 }
-                continue;
-            };
-            let (cx0, cy0) = (x_lo.max(x0), y_lo.max(y0));
-            let (cx1, cy1) = (x_hi.min(x1), y_hi.min(y1));
-            if cx0 >= cx1 || cy0 >= cy1 {
+                write += 6;
                 continue;
             }
-            let t = |p: f32, lo: f32, hi: f32| if hi == lo { 0.0 } else { (p - lo) / (hi - lo) };
-            let corner = |x, y| {
-                clip_corner::clip_corner(
-                    [tl, tr, br, bl],
-                    [x, y],
-                    [t(x, x_lo, x_hi), t(y, y_lo, y_hi)],
-                )
-            };
-            let c = [
-                corner(cx0, cy0),
-                corner(cx1, cy0),
-                corner(cx1, cy1),
-                corner(cx0, cy1),
-            ];
-            self.vertices.extend([0, 1, 2, 0, 2, 3].map(|i| c[i]));
+            cut.clear();
+            clip_quad(q, [x0, y0, x1, y1], &mut cut);
+            if write + cut.len() <= read + 6 {
+                self.vertices[write..write + cut.len()].copy_from_slice(&cut);
+                write += cut.len();
+                continue;
+            }
+            let rest: Vec<[HudVertex; 6]> = self.vertices[read + 6..start + count * 6]
+                .as_chunks::<6>()
+                .0
+                .to_vec();
+            self.vertices.truncate(write);
+            self.vertices.extend_from_slice(&cut);
+            for q in rest {
+                moved.push(self.vertices.len() as u32);
+                clip_quad(q, [x0, y0, x1, y1], &mut self.vertices);
+            }
+            appending = true;
+            break;
+        }
+        if !appending {
+            self.vertices.truncate(write);
         }
         moved.push(self.vertices.len() as u32);
         let at = |v: u32| moved[((v as usize).saturating_sub(start) / 6).min(moved.len() - 1)];
@@ -2562,6 +2809,10 @@ pub struct HudRenderer {
     atlas_view: wgpu::TextureView,
     /// The resource pack's text shader, when it has one that works.
     pack_text: Option<pack_text::PackText>,
+    /// The resource pack's `position_tex_color`, when it has one that works, and its bind
+    /// group for each picture a `Blend::PackBlit` reads.
+    pack_blit: Option<pack_text::PackText>,
+    pack_blit_groups: HashMap<u64, wgpu::BindGroup>,
     /// Target pixels per window pixel: above 1 for a screenshot drawn larger than the
     /// window (`Renderer::screenshot_quality`).
     pub zoom: f32,
@@ -2845,6 +3096,8 @@ impl HudRenderer {
             coverage,
             atlas_view: view.clone(),
             pack_text: None,
+            pack_blit: None,
+            pack_blit_groups: HashMap::new(),
             zoom: 1.0,
         })
     }
@@ -2867,8 +3120,41 @@ impl HudRenderer {
         shader: Option<&crate::core_shader::CoreProgram>,
     ) {
         self.pack_text = shader.and_then(|shader| {
-            pack_text::PackText::new(device, self.format, &self.atlas_view, shader, self.coverage)
+            pack_text::PackText::new(
+                device,
+                self.format,
+                &self.atlas_view,
+                shader,
+                self.coverage,
+                "text",
+            )
         });
+    }
+    /// Draw the menu textures `HudBatch::pack_blit` records with `shader`
+    /// (`HudAtlas::blit_shader`), or natively.
+    pub fn set_blit_shader(
+        &mut self,
+        device: &wgpu::Device,
+        shader: Option<&crate::core_shader::CoreProgram>,
+    ) {
+        // The pictures are made again with the new shader's bind groups.
+        self.pictures.clear();
+        self.pack_blit_groups.clear();
+        self.pack_blit = shader.and_then(|shader| {
+            pack_text::PackText::new(
+                device,
+                self.format,
+                &self.atlas_view,
+                shader,
+                self.coverage,
+                "position_tex_color",
+            )
+        });
+    }
+    /// The pictures are made and uploaded again on the next `prepare`: a frame given up
+    /// (#13624) dropped their uploads.
+    pub fn forget_pictures(&mut self) {
+        self.pictures.clear();
     }
     /// Stage `patches` into the shared atlas texture.
     pub fn upload_patches(
@@ -2948,8 +3234,8 @@ impl HudRenderer {
                 batch.glint_colour,
             )),
         );
-        if let Some(pack_text) = &self.pack_text {
-            pack_text.prepare(uploads, encoder, batch, size, batch.scale * self.zoom);
+        for pack in [&self.pack_text, &self.pack_blit].into_iter().flatten() {
+            pack.prepare(uploads, encoder, batch, size, batch.scale * self.zoom);
         }
     }
     /// Draw the batch `prepare` staged.
@@ -3070,6 +3356,21 @@ impl HudRenderer {
                         }
                         continue;
                     }
+                    Blend::PackBlit(id) => {
+                        if let (Some(pack), Some(group)) =
+                            (&self.pack_blit, self.pack_blit_groups.get(id))
+                        {
+                            pack.draw_with(&mut pass, group, range.clone(), coverage.is_some());
+                            pass.set_bind_group(0, &self.group, &[]);
+                        }
+                        continue;
+                    }
+                    Blend::PackBlitNative(id)
+                        if self.pack_blit.is_some() && self.pack_blit_groups.contains_key(id) =>
+                    {
+                        continue;
+                    }
+                    Blend::PackBlitNative(_) => &self.pipeline,
                 };
                 let pipeline = pipeline.get(coverage.is_some());
                 match &self.pack_text {
@@ -3279,6 +3580,51 @@ mod tests {
         assert!(decode_bytes(webp).is_err());
     }
 
+    /// A pack PNG of a few dozen bytes whose header claims one row more than a full atlas would
+    /// make the decoder reserve 1 GiB; it is refused from its header, with nothing reserved.
+    #[test]
+    fn decode_bytes_refuses_a_png_claiming_a_huge_size() {
+        let error = decode_bytes(&claimed_size_png(16_385, 16_384)).unwrap_err();
+        assert!(
+            error.to_string().contains("16385x16384 PNG is larger"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn png_sizes_are_bounded_by_a_full_atlas() {
+        let texels = MAX_ATLAS_SIZE * MAX_ATLAS_SIZE;
+        assert_eq!(check_png_size(MAX_ATLAS_SIZE, MAX_ATLAS_SIZE), Ok(()));
+        assert_eq!(check_png_size(16, texels / 16), Ok(()));
+        assert_eq!(check_png_size(texels, 1), Ok(()));
+        assert!(check_png_size(MAX_ATLAS_SIZE + 1, MAX_ATLAS_SIZE).is_err());
+        assert!(check_png_size(texels + 1, 1).is_err());
+        assert!(check_png_size(u32::MAX, u32::MAX).is_err());
+    }
+
+    /// A strip of 16x16 frames longer than any texture side holds about 2 MiB and loads.
+    #[test]
+    fn decode_bytes_reads_a_strip_longer_than_any_texture_side() {
+        let height = crate::atlas_sources::MAX_SPRITE_SIDE as u32 + 16;
+        let (width, read_height, rgba) = decode_bytes(&grey_png(16, height)).unwrap();
+        assert_eq!((width, read_height), (16, height));
+        assert_eq!(rgba.len(), 16 * height as usize * 4);
+        assert_eq!(rgba[..4], [128, 128, 128, 255]);
+    }
+
+    /// A HUD sprite's first frame whose square no atlas holds keeps the whole image, as frame
+    /// metadata that doesn't fit does; an ordinary strip gives its first square frame.
+    #[test]
+    fn a_first_frame_too_large_to_square_keeps_the_image() {
+        let wide = AnimationMetadata::from_json(r#"{"width":16385,"height":1}"#).unwrap();
+        let image = (16_385, 2, vec![7; 16_385 * 2 * 4]);
+        let (w, h, pixels) = first_frame(image, Some(&wide));
+        assert_eq!((w, h, pixels.len()), (16_385, 2, 16_385 * 2 * 4));
+        let strip = AnimationMetadata::from_json("{}").unwrap();
+        let (w, h, pixels) = first_frame((16, 32, vec![7; 16 * 32 * 4]), Some(&strip));
+        assert_eq!((w, h, pixels.len()), (16, 16, 16 * 16 * 4));
+    }
+
     #[test]
     fn decode_bytes_ignores_crc_checksum_error() {
         let mut encoded = Vec::new();
@@ -3329,6 +3675,241 @@ mod tests {
         encoded[ihdr + 4 + 13] ^= 0xFF;
         let (w, h, rgba) = decode_bytes(&encoded).expect("a bad IHDR CRC decodes, as stb_image's");
         assert_eq!((w, h, rgba.len()), (2, 2, 16));
+    }
+
+    /// `clip_since` as it was: every quad taken out, and what is kept of each put back.
+    fn clip_by_copy(batch: &mut HudBatch, start: usize, x0: f32, y0: f32, x1: f32, y1: f32) {
+        let quads: Vec<[HudVertex; 6]> = batch.vertices[start..].as_chunks::<6>().0.to_vec();
+        batch.vertices.truncate(start);
+        let mut moved = Vec::new();
+        for q in quads {
+            moved.push(batch.vertices.len() as u32);
+            let corners = [q[0], q[1], q[2], q[5]];
+            let (mut x_lo, mut x_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            let (mut y_lo, mut y_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for v in &corners {
+                x_lo = x_lo.min(v.pos[0]);
+                x_hi = x_hi.max(v.pos[0]);
+                y_lo = y_lo.min(v.pos[1]);
+                y_hi = y_hi.max(v.pos[1]);
+            }
+            let find = |x: f32, y: f32| corners.iter().find(|v| v.pos == [x, y]).copied();
+            let rect = (
+                find(x_lo, y_lo),
+                find(x_hi, y_lo),
+                find(x_hi, y_hi),
+                find(x_lo, y_hi),
+            );
+            let (Some(tl), Some(tr), Some(br), Some(bl)) = rect else {
+                for tri in [[q[0], q[1], q[2]], [q[3], q[4], q[5]]] {
+                    let area = (tri[1].pos[0] - tri[0].pos[0]) * (tri[2].pos[1] - tri[0].pos[1])
+                        - (tri[2].pos[0] - tri[0].pos[0]) * (tri[1].pos[1] - tri[0].pos[1]);
+                    if area == 0.0 {
+                        continue;
+                    }
+                    let mut poly = tri.to_vec();
+                    for (axis, limit, keep_below) in
+                        [(0, x0, false), (0, x1, true), (1, y0, false), (1, y1, true)]
+                    {
+                        poly = clip_polygon(&poly, axis, limit, keep_below);
+                    }
+                    for i in 1..poly.len().saturating_sub(1) {
+                        let (a, b, c) = (poly[0], poly[i], poly[i + 1]);
+                        batch.vertices.extend_from_slice(&[a, b, c, a, c, c]);
+                    }
+                }
+                continue;
+            };
+            let (cx0, cy0) = (x_lo.max(x0), y_lo.max(y0));
+            let (cx1, cy1) = (x_hi.min(x1), y_hi.min(y1));
+            if cx0 >= cx1 || cy0 >= cy1 {
+                continue;
+            }
+            let t = |p: f32, lo: f32, hi: f32| if hi == lo { 0.0 } else { (p - lo) / (hi - lo) };
+            let corner = |x, y| {
+                clip_corner::clip_corner(
+                    [tl, tr, br, bl],
+                    [x, y],
+                    [t(x, x_lo, x_hi), t(y, y_lo, y_hi)],
+                )
+            };
+            let c = [
+                corner(cx0, cy0),
+                corner(cx1, cy0),
+                corner(cx1, cy1),
+                corner(cx0, cy1),
+            ];
+            batch.vertices.extend([0, 1, 2, 0, 2, 3].map(|i| c[i]));
+        }
+        moved.push(batch.vertices.len() as u32);
+        let at = |v: u32| moved[((v as usize).saturating_sub(start) / 6).min(moved.len() - 1)];
+        for (range, _) in &mut batch.blends {
+            if range.start as usize >= start {
+                *range = at(range.start)..at(range.end);
+            }
+        }
+        batch.blends.retain(|(range, _)| !range.is_empty());
+    }
+
+    #[test]
+    fn a_clip_in_place_is_the_clip_by_copy() {
+        let mut seed = 0x2545_f491_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f32 / (1u64 << 53) as f32
+        };
+        let vertex = |x: f32, y: f32, color: u32| HudVertex {
+            pos: [x, y],
+            uv: [x / 64.0, y / 64.0],
+            color,
+            depth: 0.0,
+            glint_uv: [0.0, 0.0],
+            text: 0,
+        };
+        for case in 0..80 {
+            let mut batch = HudBatch::scratch([854, 480]);
+            let start = (next() * 3.0) as usize * 6;
+            for _ in 0..start {
+                batch.vertices.push(vertex(-500.0, -500.0, 1));
+            }
+            let quads = 1 + (next() * 24.0) as usize;
+            for i in 0..quads {
+                let (x, y) = (next() * 120.0 - 10.0, next() * 120.0 - 10.0);
+                let (w, h) = (next() * 40.0 + 1.0, next() * 40.0 + 1.0);
+                let color = i as u32;
+                let c = [
+                    vertex(x, y, color),
+                    vertex(x + w, y, color),
+                    vertex(x + w, y + h, color),
+                    vertex(x, y + h, color),
+                ];
+                let q = [0, 1, 2, 0, 2, 3].map(|k| c[k]);
+                batch.vertices.extend_from_slice(&q);
+            }
+            let len = batch.vertices.len() as u32;
+            batch.blends.push((start as u32..len, Blend::Alpha));
+            let mut by_copy = HudBatch::scratch([854, 480]);
+            by_copy.vertices = batch.vertices.clone();
+            by_copy.blends = batch.blends.clone();
+            batch.clip_since(start, 10.0, 10.0, 80.0, 80.0);
+            clip_by_copy(&mut by_copy, start, 10.0, 10.0, 80.0, 80.0);
+            let bytes = |b: &HudBatch| bytemuck::cast_slice::<HudVertex, u8>(&b.vertices).to_vec();
+            assert!(bytes(&batch) == bytes(&by_copy), "case {case}: vertices");
+            assert_eq!(batch.blends, by_copy.blends, "case {case}: blends");
+        }
+    }
+
+    #[test]
+    fn clipping_growth_keeps_following_quads_and_their_blends() {
+        let uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let outside = [[20.0, 1.0], [22.0, 1.0], [22.0, 3.0], [20.0, 3.0]];
+        let inside = [[10.0, 1.0], [12.0, 1.0], [12.0, 3.0], [10.0, 3.0]];
+        let triangle = [[0.0, 0.0], [16.0, 0.0], [0.0, 16.0], [0.0, 16.0]];
+        for discard_first in [false, true] {
+            let mut batch = HudBatch::scratch([320, 240]);
+            let mut draw = |corners, color, blend| {
+                let start = batch.vertices.len();
+                batch.quad(corners, uv, color);
+                batch.blend_since(start, blend);
+            };
+            // The cut triangle emits 12 vertices. A discarded first quad leaves six slots
+            // for its growth, otherwise clipping must move the unread quads out of the way.
+            if discard_first {
+                draw(outside, 0xff00_00ff, Blend::Picture(1));
+            }
+            draw(triangle, 0xff00_ff00, Blend::Additive);
+            draw(inside, 0xff00_ffff, Blend::Invert);
+            draw(outside, 0xffff_0000, Blend::Picture(2));
+
+            let mut by_copy = HudBatch::scratch([320, 240]);
+            by_copy.vertices = batch.vertices.clone();
+            by_copy.blends = batch.blends.clone();
+            batch.clip_since(0, -1.0, -1.0, 17.0, 4.0);
+            clip_by_copy(&mut by_copy, 0, -1.0, -1.0, 17.0, 4.0);
+            assert_eq!(
+                bytemuck::cast_slice::<HudVertex, u8>(&batch.vertices),
+                bytemuck::cast_slice::<HudVertex, u8>(&by_copy.vertices),
+                "discard_first={discard_first}"
+            );
+            assert_eq!(
+                batch.blends, by_copy.blends,
+                "discard_first={discard_first}"
+            );
+            assert_eq!(batch.vertices.len(), 18);
+            assert_eq!(
+                batch.blends,
+                [(0..12, Blend::Additive), (12..18, Blend::Invert)]
+            );
+        }
+    }
+
+    #[test]
+    fn clipping_in_place_is_faster_than_taking_every_quad_out() {
+        use std::time::Instant;
+        const QUADS: usize = 4000;
+        const RUNS: usize = 11;
+        let vertex = |x: f32, y: f32| HudVertex {
+            pos: [x, y],
+            uv: [0.0, 0.0],
+            color: 1,
+            depth: 0.0,
+            glint_uv: [0.0, 0.0],
+            text: 0,
+        };
+        let fill = || {
+            let mut batch = HudBatch::scratch([854, 480]);
+            for i in 0..QUADS {
+                let x = (i % 80) as f32;
+                let y = (i / 80) as f32;
+                let c = [
+                    vertex(x, y),
+                    vertex(x + 0.5, y),
+                    vertex(x + 0.5, y + 0.5),
+                    vertex(x, y + 0.5),
+                ];
+                batch.vertices.extend([0, 1, 2, 0, 2, 3].map(|k| c[k]));
+            }
+            batch
+        };
+        let bytes = |b: &HudBatch| bytemuck::cast_slice::<HudVertex, u8>(&b.vertices).to_vec();
+        let mut left = fill();
+        let mut right = fill();
+        left.clip_since(0, 0.0, 0.0, 100.0, 100.0);
+        clip_by_copy(&mut right, 0, 0.0, 0.0, 100.0, 100.0);
+        assert_eq!(bytes(&left), bytes(&right));
+        let mut inplace = Vec::new();
+        let mut copied = Vec::new();
+        for _ in 0..RUNS {
+            let mut batch = fill();
+            let start = Instant::now();
+            batch.clip_since(0, 0.0, 0.0, 100.0, 100.0);
+            inplace.push(start.elapsed().as_nanos());
+            let mut batch = fill();
+            let start = Instant::now();
+            clip_by_copy(&mut batch, 0, 0.0, 0.0, 100.0, 100.0);
+            copied.push(start.elapsed().as_nanos());
+        }
+        inplace.sort_unstable();
+        copied.sort_unstable();
+        let med = |s: &[u128]| s[s.len() / 2];
+        let p95 = |s: &[u128]| s[((s.len() as f64) * 0.95).ceil() as usize - 1];
+        let report = format!(
+            "scene quads={QUADS} all inside a 100x100 clip, runs={RUNS}\n\
+             copy_ns median={} p95={} worst={}\n\
+             inplace_ns median={} p95={} worst={}\n",
+            med(&copied),
+            p95(&copied),
+            copied[copied.len() - 1],
+            med(&inplace),
+            p95(&inplace),
+            inplace[inplace.len() - 1],
+        );
+        std::fs::write(std::env::temp_dir().join("hz-measure-hud.txt"), &report).unwrap();
+        println!("{report}");
+        // Keep the exact workload/output gate independent of host scheduling.
+        assert_eq!(left.vertices.len(), QUADS * 6);
     }
 
     #[test]
@@ -3709,6 +4290,20 @@ mod tests {
         assert!(atlas.random_textures.get("entity/pig/pig").is_some());
         fs::remove_dir_all(&root).unwrap();
     }
+    /// A custom entity model's texture beside its model, outside `textures/`, packs under the
+    /// name `atlas_name` gives it, so the model draws with it.
+    #[test]
+    fn cem_texture_beside_its_model_packs_under_its_atlas_name() {
+        let root = std::env::temp_dir().join(format!("horizon-atlas-cem-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cem = root.join("assets/minecraft/optifine/cem");
+        fs::create_dir_all(&cem).unwrap();
+        write_strip(&cem.join("zombie2.png"), 64, 32, &[[0, 200, 0, 255]], None);
+        let atlas = HudAtlas::build(&ResourceSource::directory(root.clone())).unwrap();
+        let rect = atlas.sprites["minecraft:optifine/cem/zombie2"];
+        assert_eq!(texel_at(&atlas, rect, 0, 0), [0, 200, 0, 255]);
+        fs::remove_dir_all(&root).unwrap();
+    }
     /// A random variant's emissive overlay packs beside the variant, under its name.
     #[test]
     fn variant_overlays_pack_under_their_names() {
@@ -3786,8 +4381,36 @@ mod tests {
         write_strip(&dir.join(&overlay), 16, 16, &[[1, 2, 3, 255]], None);
         let overlays: HashSet<String> = [overlay.clone()].into();
         let all = [&files[0], &overlay, &files[1]];
-        let kept = budgeted(&source, all.into_iter(), &overlays, 600);
+        let kept = budgeted(&source, all.into_iter(), &overlays, &HashSet::new(), 600);
         assert_eq!(kept, [files[0].clone(), files[1].clone()].into());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    /// A budget that holds one image keeps the random variant that already drew and drops the
+    /// custom entity model's texture, though its path sorts first.
+    #[test]
+    fn a_models_texture_leaves_the_budget_after_a_random_variant() {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-atlas-cem-budget-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let source = ResourceSource::directory(dir.clone());
+        let cem = "assets/minecraft/optifine/cem/zombie2.png".to_owned();
+        let variant = "assets/minecraft/optifine/random/entity/zombie/zombie2.png".to_owned();
+        for path in [&cem, &variant] {
+            let file = dir.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            write_strip(&file, 16, 16, &[[1, 2, 3, 255]], None);
+        }
+        // 256 texels each: 256 holds the variant alone.
+        let models: HashSet<String> = [cem.clone()].into();
+        let kept = budgeted(
+            &source,
+            [&cem, &variant].into_iter(),
+            &HashSet::new(),
+            &models,
+            256,
+        );
+        assert_eq!(kept, [variant].into());
         fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
@@ -3949,6 +4572,42 @@ mod tests {
         assert_eq!(texel_at(&atlas, rect, 0, 0), [40, 180, 80, 255]);
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// A still item texture is the whole image, as `SpriteResourceLoader` loads one without an
+    /// animation section: a mod's 64x32 texture keeps the right half its model's UVs reach (a
+    /// cut to the top-left square left an item's parts drawing transparent texels).
+    #[test]
+    fn a_still_wide_item_texture_packs_whole() {
+        let root =
+            std::env::temp_dir().join(format!("horizon-atlas-wide-item-{}", std::process::id()));
+        let atlases = root.join("assets/minecraft/atlases");
+        let item = root.join("assets/gear/textures/item");
+        fs::create_dir_all(&atlases).unwrap();
+        fs::create_dir_all(&item).unwrap();
+        fs::write(
+            atlases.join("items.json"),
+            r#"{"sources": [{"type": "directory", "source": "item", "prefix": "item/"}]}"#,
+        )
+        .unwrap();
+        // Top rows green, bottom rows red, no mcmeta.
+        write_strip(
+            &item.join("wide.png"),
+            64,
+            32,
+            &[[0, 255, 0, 255], [255, 0, 0, 255]],
+            None,
+        );
+        let atlas = HudAtlas::build(&horizon_assets::resource_source::ResourceSource::directory(
+            root.to_path_buf(),
+        ))
+        .unwrap();
+        let _ = fs::remove_dir_all(&root);
+        let rect = atlas.sprites["gear:item/wide"];
+        assert_eq!(rect.texels((atlas.width, atlas.height)), (64, 32));
+        assert_eq!(texel_at(&atlas, rect, 63, 0), [0, 255, 0, 255]);
+        assert_eq!(texel_at(&atlas, rect, 63, 31), [255, 0, 0, 255]);
+    }
+
     #[test]
     fn another_namespaces_animated_item_texture_packs_its_first_frame_and_animates() {
         let root =
@@ -4450,6 +5109,11 @@ texture=wide",
         write_png(&pack, "block/stone", 32, 32);
         write_png(&pack, "item/compass", 32, 1024);
         write_png(&pack, "gui/sprites/pack_only", 30, 10);
+        // The strip animates in each: a still texture is the whole image, its folder aside.
+        for root in [&defaults, &pack] {
+            let meta = root.join("assets/minecraft/textures/item/compass.png.mcmeta");
+            fs::write(meta, r#"{"animation": {}}"#).unwrap();
+        }
         let atlas = HudAtlas::build_over(
             &horizon_assets::resource_source::ResourceSource::directory(pack.to_path_buf()),
             &horizon_assets::resource_source::ResourceSource::directory(defaults.to_path_buf()),
@@ -4682,6 +5346,92 @@ texture=wide",
         let slot = images.iter().find(|i| i.0 == "horizon/map").unwrap();
         assert_eq!((slot.1, slot.2), (128, 128));
         assert!(slot.3.is_empty());
+    }
+    /// Past the models, a mod's other textures lose resolution, the largest
+    /// first and keeping their logical size and shape; vanilla's, the kept
+    /// ones (font sheets) and run-time slots don't.
+    #[test]
+    fn overflowing_mod_textures_are_capped_largest_first() {
+        let mut images = vec![
+            (
+                "big:gui/book".into(),
+                1024,
+                512,
+                [1, 2, 3, 255].repeat(1024 * 512),
+            ),
+            (
+                "gui/panel".into(),
+                512,
+                256,
+                [7, 8, 9, 255].repeat(512 * 256),
+            ),
+            (
+                "big:font/glyphs".into(),
+                256,
+                256,
+                [5, 5, 5, 255].repeat(256 * 256),
+            ),
+            (
+                "big:entity/boss".into(),
+                128,
+                128,
+                [4, 5, 6, 255].repeat(128 * 128),
+            ),
+            ("big:gui/slot".into(), 128, 128, Vec::new()),
+        ];
+        let keep = HashSet::from(["big:font/glyphs".to_owned()]);
+        let mods = HashSet::from(["big".to_owned()]);
+        let mut sizes = HashMap::new();
+        assert!(HudAtlas::layout(&images, 1024).is_err());
+        let (width, placements, free) =
+            HudAtlas::layout_capping_mod_textures(&mut images, &mut sizes, &keep, &mods, 1024)
+                .unwrap();
+        assert_inside(&images, width, &placements, free);
+        let find = |name: &str| images.iter().find(|i| i.0 == name).unwrap().clone();
+        let book = find("big:gui/book");
+        assert_eq!((book.1, book.2), (256, 128));
+        assert_eq!(book.3, [1, 2, 3, 255].repeat(256 * 128));
+        assert_eq!(sizes["big:gui/book"], (1024, 512));
+        // Smaller than the cap that was enough: left as it was.
+        let boss = find("big:entity/boss");
+        assert_eq!((boss.1, boss.2), (128, 128));
+        assert!(!sizes.contains_key("big:entity/boss"));
+        for (name, w, h) in [
+            ("gui/panel", 512, 256),
+            ("big:font/glyphs", 256, 256),
+            ("big:gui/slot", 128, 128),
+        ] {
+            let image = find(name);
+            assert_eq!((image.1, image.2), (w, h), "{name}");
+        }
+    }
+    /// The last cap tried is 16 texels, also when halving would pass below it;
+    /// a namespace no mod owns is never capped.
+    #[test]
+    fn mod_textures_are_capped_down_to_16_texels() {
+        let mut images = vec![
+            (
+                "gui/wide".into(),
+                1000,
+                490,
+                [1, 1, 1, 255].repeat(1000 * 490),
+            ),
+            ("m:gui/dot".into(), 31, 31, [2, 2, 2, 255].repeat(31 * 31)),
+        ];
+        assert!(HudAtlas::layout(&images, 1024).is_err());
+        let mut sizes = HashMap::new();
+        // `m` is no mod's (a resource pack's own namespace): its texture stays whole.
+        let none = HashSet::new();
+        assert!(
+            HudAtlas::layout_capping_mod_textures(&mut images, &mut sizes, &none, &none, 1024)
+                .is_err()
+        );
+        assert!(sizes.is_empty());
+        let mods = HashSet::from(["m".to_owned()]);
+        HudAtlas::layout_capping_mod_textures(&mut images, &mut sizes, &none, &mods, 1024).unwrap();
+        let dot = images.iter().find(|i| i.0 == "m:gui/dot").unwrap();
+        assert_eq!((dot.1, dot.2), (16, 16));
+        assert_eq!(sizes["m:gui/dot"], (31, 31));
     }
     #[test]
     fn fitting_models_keep_their_pixels_and_existing_logical_sizes() {
