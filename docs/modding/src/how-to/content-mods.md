@@ -311,9 +311,13 @@ A block with template `minecraft:farmland` may set `"base_block": "namespace:blo
 
 A custom growing-plant head can name its pair so both blocks get the right survival check. Put `growing_plant` on the
 head block only; its `head` id must be that block, and `body` must name another declared block using the matching
-vanilla body template. `direction` is `up` or `down`. Set `kelp` to `true` when the plant rejects support blocks tagged
+vanilla body template from the same mod (including one of its declared namespaces). The body has no item: set
+`"item": false` and omit `block_item` and `pick_item`. `direction` is `up` or `down`. Set `kelp` to `true` when the plant rejects support blocks tagged
 `minecraft:cannot_support_kelp` (it defaults to `false`). This describes survival checks; it does not add growth or
 placement behavior beyond the chosen vanilla templates.
+
+The generated survival rule for the pair takes precedence over entries for either block in
+`worldgen/blocks/survival-rules.json`.
 
 ```json
 { "template": "minecraft:weeping_vines",

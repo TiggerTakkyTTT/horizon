@@ -1203,7 +1203,7 @@ impl Content {
             }
         }
         let all: Vec<&Block> = self.blocks.iter().chain(blocks).collect();
-        check_growing_plant_pairs(&all)?;
+        check_growing_plant_pairs(&all, &self.namespaces)?;
         check_wall_pairs(&all)?;
         for item in items {
             let id = item.id.as_str();
@@ -1406,7 +1406,10 @@ impl Content {
             }
             self.blocks.push(block);
         }
-        check_growing_plant_pairs(&self.blocks.iter().collect::<Vec<_>>())?;
+        check_growing_plant_pairs(
+            &self.blocks.iter().collect::<Vec<_>>(),
+            &self.namespaces,
+        )?;
         // After every block, so a wall form may be declared in a later file.
         check_wall_pairs(&self.blocks.iter().collect::<Vec<_>>())?;
         let mut remainders = Vec::new();
@@ -1954,12 +1957,22 @@ fn growing_plant_body_template(head_template: &str) -> Option<&'static str> {
     }
 }
 
-fn check_growing_plant_pairs(blocks: &[&Block]) -> Result<(), String> {
+fn check_growing_plant_pairs(blocks: &[&Block], namespaces: &[String]) -> Result<(), String> {
     let mut body_owners = BTreeMap::new();
     for head in blocks {
         let Some(family) = &head.growing_plant else {
             continue;
         };
+        let body_is_owned = family
+            .body
+            .split_once(':')
+            .is_some_and(|(namespace, _)| namespaces.iter().any(|owned| owned == namespace));
+        if !body_is_owned {
+            return Err(format!(
+                "{}: growing_plant body {} must be one of this mod's blocks",
+                head.id, family.body
+            ));
+        }
         if let Some(previous_head) = body_owners.insert(family.body.as_str(), head.id.as_str()) {
             return Err(format!(
                 "{}: growing_plant body {} is already assigned to {previous_head}",
@@ -1980,6 +1993,12 @@ fn check_growing_plant_pairs(blocks: &[&Block]) -> Result<(), String> {
         if body.template != expected_template {
             return Err(format!(
                 "{}: growing_plant body {} must use template {expected_template}",
+                head.id, family.body
+            ));
+        }
+        if body.item || body.block_item.is_some() || body.pick_item.is_some() {
+            return Err(format!(
+                "{}: growing_plant body {} has no item, so it sets \"item\": false and no block_item or pick_item",
                 head.id, family.body
             ));
         }
@@ -3564,7 +3583,7 @@ capabilities = ["registries"]
         };
         const VALID_HEAD: &[u8] = br#"{"template":"minecraft:weeping_vines","growing_plant":{"head":"ruby:head","body":"ruby:body","direction":"down"}}"#;
         const MISSING_BODY_HEAD: &[u8] = br#"{"template":"minecraft:weeping_vines","growing_plant":{"head":"ruby:head","body":"ruby:missing","direction":"down"}}"#;
-        const VALID_BODY: &[u8] = br#"{"template":"minecraft:weeping_vines_plant"}"#;
+        const VALID_BODY: &[u8] = br#"{"template":"minecraft:weeping_vines_plant","item":false}"#;
         const WRONG_BODY: &[u8] = br#"{"template":"minecraft:twisting_vines_plant"}"#;
         let load = |name: &str, head: &[u8], body: Option<&[u8]>| {
             let mut files = vec![("data/ruby/horizon/block/head.json", head)];
@@ -3609,6 +3628,57 @@ capabilities = ["registries"]
             Some(family("ruby:head", "ruby:body")),
         );
         let body = block("ruby:body", "minecraft:weeping_vines_plant", None);
+
+        let foreign_head = block(
+            "ruby:head",
+            "minecraft:weeping_vines",
+            Some(family("ruby:head", "dependency:body")),
+        );
+        let error = Content::declared("ruby")
+            .declare(&[foreign_head], &[])
+            .unwrap_err();
+        assert!(error.contains("body dependency:body must be one of this mod's blocks"));
+
+        let mut namespaced_content = Content::declared("ruby");
+        namespaced_content.namespaces.push("ruby_extra".into());
+        namespaced_content
+            .declare(
+                &[
+                    block(
+                        "ruby:head",
+                        "minecraft:weeping_vines",
+                        Some(family("ruby:head", "ruby_extra:body")),
+                    ),
+                    block("ruby_extra:body", "minecraft:weeping_vines_plant", None),
+                ],
+                &[],
+            )
+            .unwrap();
+
+        for (name, body) in [
+            {
+                let mut body = block("ruby:body", "minecraft:weeping_vines_plant", None);
+                body.item = true;
+                ("item", body)
+            },
+            {
+                let mut body = block("ruby:body", "minecraft:weeping_vines_plant", None);
+                body.block_item = Some("ruby:body_item".into());
+                ("block_item", body)
+            },
+            {
+                let mut body = block("ruby:body", "minecraft:weeping_vines_plant", None);
+                body.pick_item = Some("ruby:seed".into());
+                ("pick_item", body)
+            },
+        ] {
+            let mut content = Content::declared("ruby");
+            let error = content
+                .declare(&[head.clone(), body], &[])
+                .unwrap_err();
+            assert!(error.contains("body ruby:body has no item"), "{name}: {error}");
+        }
+
         let mut content = Content::declared("ruby");
         content.declare(&[head, body.clone()], &[]).unwrap();
 

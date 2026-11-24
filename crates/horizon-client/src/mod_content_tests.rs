@@ -4624,7 +4624,7 @@ fn declared_growing_plant_family_reaches_world_behaviours() {
             ),
             (
                 "data/testmod/horizon/block/vines_body.json",
-                r#"{"template":"minecraft:weeping_vines_plant"}"#,
+                r#"{"template":"minecraft:weeping_vines_plant","item":false}"#,
             ),
         ],
     );
