@@ -645,6 +645,7 @@ horizon-client game::finalize_spawn::tests::the_striders_piglin_rider_needs_spaw
 horizon-client game::fireworks::events_tests::a_detonating_rocket_posts_one_explode_from_its_owner lib daily resources
 horizon-client game::fireworks::events_tests::a_falling_rocket_hits_the_ground_and_one_in_water_splashes lib daily resources
 horizon-client game::fireworks::events_tests::a_silent_rocket_bursts_without_blast_or_twinkle lib daily resources
+horizon-client game::fireworks::events_tests::another_players_boost_rocket_sits_at_their_rocket_hand lib daily resources
 horizon-client game::fireworks::events_tests::launching_from_a_block_and_while_gliding_use_the_rocket_up lib daily resources
 horizon-client game::fireworks::hit_attempt_tests::remaining_hit_callers_observe_refusals_and_zero_damage lib daily resources
 horizon-client game::fireworks::tests::a_flying_rocket_opens_a_motion_run_of_its_own lib daily resources
@@ -943,6 +944,7 @@ horizon-client game::living_attributes::tests::a_stand_the_dragon_and_a_player_t
 horizon-client game::living_attributes::tests::a_zombie_reads_its_defaults lib daily resources
 horizon-client game::living_attributes::tests::gear_knockback_is_read_again_only_when_the_gear_changes lib daily resources
 horizon-client game::living_attributes::tests::the_mob_attribute_packet_is_the_live_maps_instances lib daily resources
+horizon-client game::load_conditions::tests::feature_flag_conditions_use_world_and_reload_features_for_recipes_and_carvers lib daily resources
 horizon-client game::load_conditions::tests::load_conditions_recipe_reload_counts_and_failed_candidates_keep_old_recipes lib daily resources
 horizon-client game::loot_kill_guest_tests::an_empty_handed_guest_is_the_killer_and_a_missing_one_is_not lib daily resources
 horizon-client game::loot_kill_guest_tests::loot_kill_as_a_guest_is_killed_by_that_player lib daily resources
