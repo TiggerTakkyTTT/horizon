@@ -480,10 +480,14 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     fn growing_plant_can_attach_to(&self, state: BlockStateId, attached: BlockStateId) -> bool {
         let b = self.b;
         let block = b.block(state);
-        if b.block_data(block).growing_plant_kelp
-            || b.instance_of(state, Class::Kelp)
-            || b.instance_of(state, Class::KelpPlant)
-        {
+        let data = b.block_data(block);
+        let rejects_kelp_support =
+            if data.growing_plant_head.is_some() && data.growing_plant_body.is_some() {
+                data.growing_plant_kelp
+            } else {
+                b.instance_of(state, Class::Kelp) || b.instance_of(state, Class::KelpPlant)
+            };
+        if rejects_kelp_support {
             !b.in_set(attached, &b.tags.cannot_support_kelp)
         } else {
             true

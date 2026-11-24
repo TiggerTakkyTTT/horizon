@@ -184,6 +184,8 @@ fn declared_growing_plant_pairs_survive_and_pop_in_both_directions() {
     let down_body = id("minecraft:twisting_vines_plant");
     let up_head = id("minecraft:twisting_vines");
     let up_body = id("minecraft:weeping_vines_plant");
+    let kelp_head = id("minecraft:kelp");
+    let kelp_body = id("minecraft:kelp_plant");
 
     let set_family =
         |b: &mut Behaviours, head: BlockId, body: BlockId, direction: Direction, kelp: bool| {
@@ -248,14 +250,32 @@ fn declared_growing_plant_pairs_survive_and_pop_in_both_directions() {
         })
         .expect("the vanilla cannot_support_kelp tag has a sturdy support block");
     let forbidden_state = b.table.default_state(forbidden_support);
-    set_family(&mut b, up_head, up_body, Direction::Up, true);
     let support_pos = BlockPos::new(10, 1, 2);
     let head_pos = BlockPos::new(10, 2, 2);
     level.set_raw(support_pos, forbidden_state);
-    level.set_raw(head_pos, b.table.default_state(up_head));
+    level.set_raw(head_pos, b.table.default_state(kelp_head));
     let head_state = level.block_state(head_pos);
+
+    set_family(&mut b, kelp_head, kelp_body, Direction::Up, false);
+    assert!(
+        b.can_survive(&mut level, &mut ticks, head_pos, head_state),
+        "a declared family with kelp=false must allow tagged supports"
+    );
+
+    set_family(&mut b, kelp_head, kelp_body, Direction::Up, true);
     assert!(
         !b.can_survive(&mut level, &mut ticks, head_pos, head_state),
         "kelp-like custom families must reject tagged supports"
+    );
+
+    for block in [kelp_head, kelp_body] {
+        let data = &mut b.blocks[block.0 as usize];
+        data.growing_plant_head = None;
+        data.growing_plant_body = None;
+        data.growing_plant_kelp = false;
+    }
+    assert!(
+        !b.can_survive(&mut level, &mut ticks, head_pos, head_state),
+        "vanilla kelp must keep its class-based support restriction"
     );
 }

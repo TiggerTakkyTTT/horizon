@@ -1406,10 +1406,7 @@ impl Content {
             }
             self.blocks.push(block);
         }
-        check_growing_plant_pairs(
-            &self.blocks.iter().collect::<Vec<_>>(),
-            &self.namespaces,
-        )?;
+        check_growing_plant_pairs(&self.blocks.iter().collect::<Vec<_>>(), &self.namespaces)?;
         // After every block, so a wall form may be declared in a later file.
         check_wall_pairs(&self.blocks.iter().collect::<Vec<_>>())?;
         let mut remainders = Vec::new();
@@ -3673,10 +3670,11 @@ capabilities = ["registries"]
             },
         ] {
             let mut content = Content::declared("ruby");
-            let error = content
-                .declare(&[head.clone(), body], &[])
-                .unwrap_err();
-            assert!(error.contains("body ruby:body has no item"), "{name}: {error}");
+            let error = content.declare(&[head.clone(), body], &[]).unwrap_err();
+            assert!(
+                error.contains("body ruby:body has no item"),
+                "{name}: {error}"
+            );
         }
 
         let mut content = Content::declared("ruby");
