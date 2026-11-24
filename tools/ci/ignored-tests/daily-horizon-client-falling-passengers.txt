@@ -1,0 +1,5 @@
+# The daily tests of horizon-client's falling passengers, from last reviewed; tools/ci/move_to_daily.py writes them.
+horizon-client game::armor_stands::postbaseline_lodestone_controls::falling_block_riders_tick_living_state_only_in_entity_ticking_chunks lib daily resources
+horizon-client game::persist::falling_passenger_tests::falling_block_passenger_stays_attached_to_any_loaded_vehicle lib daily resources
+horizon-client game::persist::falling_passenger_tests::mounted_falling_block_ticks_its_lifetime_and_expires lib daily resources
+horizon-client game::persist::falling_passenger_tests::summon_falling_block_loads_non_mob_passengers lib daily resources
