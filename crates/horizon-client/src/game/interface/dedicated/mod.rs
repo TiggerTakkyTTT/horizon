@@ -53,15 +53,17 @@ pub(in crate::game) fn record_world_upgrade(kind: &str, fields: serde_json::Valu
     events::record_server(kind, fields);
 }
 
-/// Serves event polls while the dedicated server prepares its first world. The normal control loop
-/// cannot run until the first tick, but the supervisor polls during startup.
+/// Serves the event poll while the dedicated server is still preparing its first world. The
+/// normal control loop cannot run until the first game tick, but the supervisor polls this endpoint
+/// during `Starting` so it can forward upgrade progress as it happens.
 struct StartupControl {
     stop: Arc<AtomicBool>,
     returned: mpsc::Receiver<control::Server>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// The supervisor polls every 250 ms. Leave time for one final poll when startup exits before ticking.
+/// The supervisor polls every 250 ms. Keep the temporary endpoint alive long enough for a final
+/// failed-upgrade event to be observed before startup returns without entering the tick loop.
 const STARTUP_FAILURE_EVENT_DRAIN: Duration = Duration::from_millis(350);
 
 impl StartupControl {
@@ -112,6 +114,8 @@ impl StartupControl {
 impl Drop for StartupControl {
     fn drop(&mut self) {
         if self.thread.is_some() {
+            // An error can return before the tick loop takes over. Give the supervisor's
+            // 250 ms poller one last chance to fetch the event that ended startup.
             std::thread::sleep(STARTUP_FAILURE_EVENT_DRAIN);
         }
         self.stop.store(true, Ordering::Relaxed);
@@ -119,6 +123,21 @@ impl Drop for StartupControl {
             let _ = thread.join();
             let _ = self.returned.recv();
         }
+    }
+}
+
+/// Ensures the progress watcher stops if the world fixer panics before the normal join path.
+pub(in crate::game) struct StopUpgradeWatcher<'a>(pub(in crate::game) &'a AtomicBool);
+
+impl<'a> StopUpgradeWatcher<'a> {
+    pub(in crate::game) fn new(stop: &'a AtomicBool) -> Self {
+        Self(stop)
+    }
+}
+
+impl Drop for StopUpgradeWatcher<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 }
 
@@ -2625,10 +2644,14 @@ impl Game<'_> {
     /// DedicatedServerSettings.update: change one key and store the file.
     pub(super) fn store_property(&mut self, key: &str, value: String) {
         let path = PathBuf::from("server.properties");
-        if let Ok(p) = ServerProperties::from_file(&path, &mut SystemEntropy::default())
-            && let Ok(p) = p.update(key, value)
-        {
-            let _ = p.store(&path);
+        let result = ServerProperties::from_file(&path, &mut SystemEntropy::default())
+            .and_then(|p| p.update(key, value))
+            .and_then(|p| p.store(&path).map_err(|e| e.to_string()));
+        if let Err(e) = result {
+            log(
+                "WARN",
+                &format!("Failed to save '{key}' in {}: {e}", path.display()),
+            );
         }
     }
 
@@ -2901,7 +2924,8 @@ mod tests {
     }
 
     use super::{
-        capture_log, log, log_from, overload_warning, panic_message, parse_whitelist_bypass,
+        Options, StartupControl, capture_log, log, log_from, overload_warning, panic_message,
+        parse_whitelist_bypass,
     };
     use std::{
         fs,
@@ -2909,6 +2933,86 @@ mod tests {
         process::{Command, Stdio},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    /// Run a failed upgrade after the supervisor's last startup poll and exercise the real drop
+    /// path while management fetches its final event.
+    #[test]
+    fn upgrade_world_failure_is_served_during_startup_shutdown_handoff() {
+        let _event_serial = super::events::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("control.sock");
+        let server = super::control::Server::start(&path).unwrap();
+        let startup = StartupControl::start(server).unwrap();
+        let mut client = horizon_client::control::connect(&path).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+
+        let cursor = super::events::since(u64::MAX)["next"].as_u64().unwrap();
+        let request = format!("server-events {cursor}");
+        writeln!(client, "{request}").unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let before_failure: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert!(
+            !before_failure["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["type"] == "world_upgrade_failed")
+        );
+
+        let world = temp.path().join("old-world");
+        horizon_client::save::write_dat(
+            &world.join("level.dat"),
+            horizon_core::nbt::Tag::compound([(
+                "Data",
+                horizon_core::nbt::Tag::compound([(
+                    "DataVersion",
+                    horizon_core::nbt::Tag::Int(4899),
+                )]),
+            )]),
+        )
+        .unwrap();
+        let broken_region = world.join("dimensions/minecraft/overworld/region/broken.mca");
+        fs::create_dir_all(broken_region.parent().unwrap()).unwrap();
+        fs::write(&broken_region, b"x").unwrap();
+
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.execution_role = crate::game::execution_role::ExecutionRole::DedicatedServer;
+        assert!(
+            crate::game::world_loading::upgrade_world(
+                &world,
+                &options,
+                &horizon_world::datafix::progress::UpgradeProgress::new(),
+            )
+            .is_err()
+        );
+        let finishing = std::thread::spawn(move || drop(startup));
+
+        line.clear();
+        writeln!(client, "{request}").unwrap();
+        reader.read_line(&mut line).unwrap();
+        let during_shutdown: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert!(
+            during_shutdown["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event["type"] == "world_upgrade_failed"
+                        && event["reason"] == "World upgrade failed"
+                }),
+            "late failure event missing from {during_shutdown}"
+        );
+
+        finishing.join().unwrap();
+        drop(reader);
+        drop(client);
+    }
 
     /// `banned-ips.json` holds addresses as text: one written by vanilla spells `::1` as Java does
     /// (`0:0:0:0:0:0:0:1`), and an IPv4 player may arrive in its `::ffff:` form. The same address bans
